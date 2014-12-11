@@ -354,7 +354,8 @@ def dechunk_http(http_data):
     while True:  
         new_offset = http_body[cur_offset:].find('\r\n')
         if new_offset==-1:  #pre-caution against endless looping
-            raise Exception('Incorrectly formed chunked http detected')
+            #pinterest.com is known to not send the last 0 chunk when HTTP gzip is disabled
+            return dechunked
         chunk_len_hex  = http_body[cur_offset:cur_offset+new_offset]
         chunk_len = int(chunk_len_hex, 16)
         if chunk_len ==0: break #for properly-formed html we should break here
