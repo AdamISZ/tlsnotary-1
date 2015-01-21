@@ -245,8 +245,7 @@ def recv_socket(sckt,is_handshake=False):
             data = rsckt.recv(1024*32)
             if not data:
                 if not databuffer:
-                    print ("Server closed the socket and sent no data")
-                    return None
+                    raise Exception ("Server closed the socket and sent no data")
                 else:
                     return databuffer
             data_from_server_seen = True  

@@ -28,6 +28,6 @@ https://www.gov.uk 47,53,5
 https://www.cloudflare.com 47,53,5
 https://www.drupal.org 47,53
 https://www.imgur.com 47,53,5
-https://www.github.com 47,53,5
+https://www.github.com 47,53
 https://www.umich.edu 47,53,5
 https://www.spotify.com 47,53

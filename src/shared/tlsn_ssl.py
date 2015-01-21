@@ -87,7 +87,8 @@ def tls_record_decoder(d):
         ver = d[1:3]
         assert ver in tls_versions, "Incompatible TLS version"
         l = ba2int(d[3:5])
-        assert len(d) >= l+5, "incomplete TLS record"
+        if len(d) < l+5:
+            raise Exception("incomplete TLS record")
         fragment = d[5:5+l]
         d = d[5+l:]
         records.append(TLSRecord(rt, v=ver, f=fragment))        
@@ -716,7 +717,7 @@ class TLSNClientSession(object):
         return (self.p_auditee)
 
     def set_enc_second_half_pms(self):
-        assert (self.server_modulus and not self.enc_second_half_pms)
+        assert (self.server_modulus)
         ones_length = 103+ba2int(self.server_mod_length)-256
         pms2 =  self.auditor_secret + ('\x00' * (24-self.n_auditor_entropy-1)) + '\x01'
         self.enc_second_half_pms = pow( ba2int('\x01'+('\x01'*(ones_length))+\

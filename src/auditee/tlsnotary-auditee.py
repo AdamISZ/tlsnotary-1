@@ -242,24 +242,39 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
             tlsn_session.auditee_padding_secret = pms_padding_secret
             tlsn_session.enc_pms = enc_pms
         
-        print ('Peforming handshake with server')
-        tls_sock = shared.create_sock(tlsn_session.server_name,tlsn_session.ssl_port)
-        tlsn_session.start_handshake(tls_sock)
-        #compare this ongoing audit's cert to the one 
-        #we used from the browser in prepare_encrypted_pms
-        verify_server(dercert, tlsn_session)
-        retval = negotiate_crippled_secrets(tlsn_session, tls_sock)
-        if not retval == 'success': 
-            raise Exception(retval)
-        b_comm_channel_busy = False                        
-        if not retval == 'success': 
-            raise Exception(retval)
-        print ('Getting data from server')            
-        response = make_tlsn_request(modified_headers,tlsn_session,tls_sock)
+        for i in range(10):
+            try:
+                print ('Peforming handshake with server')
+                tls_sock = shared.create_sock(tlsn_session.server_name,tlsn_session.ssl_port)
+                tlsn_session.start_handshake(tls_sock)
+                #compare this ongoing audit's cert to the one 
+                #we used from the browser in prepare_encrypted_pms
+                verify_server(dercert, tlsn_session)
+                retval = negotiate_crippled_secrets(tlsn_session, tls_sock)
+                if not retval == 'success': 
+                    raise Exception(retval)
+                print ('Getting data from server')            
+                response = make_tlsn_request(modified_headers,tlsn_session,tls_sock)
+                break
+            except Exception,e:
+                print ('Exception caught while communicating with server, retrying...', e)
+                if i == 9:
+                    raise Exception('Audit failed')
+                continue
+        
         global audit_no
         audit_no += 1 #we want to increase only after server responded with data
         sf = str(audit_no)
-        rv = decrypt_html(commit_session(tlsn_session, response,sf), tlsn_session, sf)
+        for i in range (10):
+            try:
+                rv = decrypt_html(commit_session(tlsn_session, response,sf), tlsn_session, sf)
+                break
+            except:
+                if i == 9:
+                    raise Exception('Audit failed')
+                print ('Exception caught while sending a commit to peer, retrying...', e)
+                continue
+        b_comm_channel_busy = False
         if rv[0] == 'success': html_paths = b64encode(rv[1])
         self.respond({'response':'start_audit', 'status':rv[0],'html_paths':html_paths})
         return           
@@ -430,6 +445,7 @@ def process_certificate_queue():
             pms_padding_secret = tls_crypto.auditee_padding_secret
             paillier_prepare_encrypted_pms(tls_crypto, cert_der)
         certs_and_enc_pms[cert_der] = (pms_secret, pms_padding_secret, tls_crypto.enc_pms)
+        print ('Successfully prepared enc_pms in advance')        
         b_comm_channel_busy = False        
 
 
@@ -438,33 +454,37 @@ def process_certificate_queue():
 #TODO the probability seems to have increased too much w.r.t. random padding, investigate
 def prepare_pms():
     for i in range(10): #keep trying until reliable site check succeeds
-        #first 4 bytes of client random are unix time
-        pms_session = shared.TLSNClientSession(rs_choice,shared.reliable_sites[rs_choice][0], ccs=53)
-        if not pms_session: 
-            raise Exception("Client session construction failed in prepare_pms")
-        tls_sock = shared.create_sock(pms_session.server_name,pms_session.ssl_port)
-        pms_session.start_handshake(tls_sock)
-        reply = send_and_recv('rcr_rsr:'+\
-            pms_session.client_random+pms_session.server_random)
-        if reply[0] != 'success': 
-            raise Exception ('Failed to receive a reply for rcr_rsr:')
-        if not reply[1].startswith('rrsapms_rhmac'):
-            raise Exception ('bad reply. Expected rrsapms_rhmac:')
-        reply_data = reply[1][len('rrsapms_rhmac:'):]
-        rsapms2 = reply_data[:256]
-        pms_session.p_auditor = reply_data[256:304]
-        response = pms_session.complete_handshake(tls_sock,rsapms2)
-        tls_sock.close()
-        if not response:
-            print ("PMS trial failed")
+        try:
+            #first 4 bytes of client random are unix time
+            pms_session = shared.TLSNClientSession(rs_choice,shared.reliable_sites[rs_choice][0], ccs=53)
+            if not pms_session: 
+                raise Exception("Client session construction failed in prepare_pms")
+            tls_sock = shared.create_sock(pms_session.server_name,pms_session.ssl_port)
+            pms_session.start_handshake(tls_sock)
+            reply = send_and_recv('rcr_rsr:'+\
+                pms_session.client_random+pms_session.server_random)
+            if reply[0] != 'success': 
+                raise Exception ('Failed to receive a reply for rcr_rsr:')
+            if not reply[1].startswith('rrsapms_rhmac'):
+                raise Exception ('bad reply. Expected rrsapms_rhmac:')
+            reply_data = reply[1][len('rrsapms_rhmac:'):]
+            rsapms2 = reply_data[:256]
+            pms_session.p_auditor = reply_data[256:304]
+            response = pms_session.complete_handshake(tls_sock,rsapms2)
+            tls_sock.close()
+            if not response:
+                print ("PMS trial failed")
+                continue
+            #judge success/fail based on whether a properly encoded 
+            #Change Cipher Spec record is returned by the server (we could
+            #also check the server finished, but it isn't necessary)
+            if not response.count(shared.TLSRecord(shared.chcis,f='\x01').serialized):
+                print ("PMS trial failed, retrying. (",binascii.hexlify(response),")")
+                continue
+            return (pms_session.auditee_secret,pms_session.auditee_padding_secret)
+        except Exception,e:
+            print ('Exception caught in prepare_pms, retrying...', e)
             continue
-        #judge success/fail based on whether a properly encoded 
-        #Change Cipher Spec record is returned by the server (we could
-        #also check the server finished, but it isn't necessary)
-        if not response.count(shared.TLSRecord(shared.chcis,f='\x01').serialized):
-            print ("PMS trial failed, retrying. (",binascii.hexlify(response),")")
-            continue
-        return (pms_session.auditee_secret,pms_session.auditee_padding_secret)
     #no dice after 10 tries
     raise Exception ('Could not prepare PMS with ', rs_choice, ' after 10 tries. Please '+\
                      'double check that you are using a valid public key modulus for this site; '+\
@@ -477,10 +497,17 @@ def prepare_encrypted_pms(tlsn_session, cert_der, pms_secret, pms_padding_secret
     n = shared.bi2ba(n_int)
     e = shared.bi2ba(e_int)
     len_n = shared.bi2ba(len(n))
-    reply = send_and_recv('n_e:'+len_n+n+e)
-    if reply[0] != 'success': return ('Failed to receive a reply for n_e:')
-    if not reply[1].startswith('rsapms:'):
-        return 'bad reply. Expected rsapms:'
+    for i in range(10):
+        try:
+            reply = send_and_recv('n_e:'+len_n+n+e)
+            if reply[0] != 'success': 
+                raise Exception ('Failed to receive a reply for n_e:')
+            if not reply[1].startswith('rsapms:'):
+                raise Exception ('bad reply. Expected rsapms:')
+            break
+        except Exception, exc:
+            print ('Exception in prepare_encrypted_pms, retrying...', exc)
+            continue
     rsapms = reply[1][len('rsapms:'):]
     tlsn_session.server_modulus = shared.ba2int(n)
     tlsn_session.server_mod_length = len_n
@@ -604,12 +631,14 @@ def negotiate_crippled_secrets(tlsn_session, tls_sock):
         tlsn_session.server_random + tlsn_session.p_auditee[:24] +  tlsn_session.handshake_hash_md5 + \
         tlsn_session.handshake_hash_sha
     reply = send_and_recv('cs_cr_sr_hmacms_verifymd5sha:'+cs_cr_sr_hmacms_verifymd5sha)
-    if reply[0] != 'success': return ('Failed to receive a reply for cs_cr_sr_hmacms_verifymd5sha:')
+    if reply[0] != 'success': 
+        raise Exception ('Failed to receive a reply for cs_cr_sr_hmacms_verifymd5sha:')
     if not reply[1].startswith('hmacms_hmacek_hmacverify:'):
-        return 'bad reply. Expected hmacms_hmacek_hmacverify: but got reply[1]'
+        raise Exception ('bad reply. Expected hmacms_hmacek_hmacverify: but got reply[1]')
     reply_data = reply[1][len('hmacms_hmacek_hmacverify:'):]
     expanded_key_len = shared.tlsn_cipher_suites[tlsn_session.chosen_cipher_suite][-1]
-    assert len(reply_data) == 24+expanded_key_len+12
+    if len(reply_data) != 24+expanded_key_len+12:
+        raise Exception('unexpected reply length in negotiate_crippled_secrets')
     hmacms = reply_data[:24]    
     hmacek = reply_data[24:24 + expanded_key_len]
     hmacverify = reply_data[24 + expanded_key_len:24 + expanded_key_len+12]   
@@ -619,8 +648,10 @@ def negotiate_crippled_secrets(tlsn_session, tls_sock):
     tlsn_session.send_client_finished(tls_sock,provided_p_value=hmacverify)
     sha_digest2,md5_digest2 = tlsn_session.set_handshake_hashes(server=True)
     reply = send_and_recv('verify_md5sha2:'+md5_digest2+sha_digest2)
-    if reply[0] != 'success':return("Failed to receive a reply for verify_md5sha2")
-    if not reply[1].startswith('verify_hmac2:'):return("bad reply. Expected verify_hmac2:")
+    if reply[0] != 'success':
+        raise Exception("Failed to receive a reply for verify_md5sha2")
+    if not reply[1].startswith('verify_hmac2:'):
+        raise Exception("bad reply. Expected verify_hmac2:")
     if not tlsn_session.check_server_ccs_finished(provided_p_value = reply[1][len('verify_hmac2:'):]):
         raise Exception ("Could not finish handshake with server successfully. Audit aborted")
     return 'success'    
