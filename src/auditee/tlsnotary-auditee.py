@@ -53,6 +53,7 @@ audit_no = 0 #we may be auditing multiple URLs. This var keeps track of how many
 paillier_private_key = None #Auditee's private key. Used for paillier_scheme.
 #Generated only once and is reused until the end of the auditing session
 b_paillier_privkey_being_generated = True #toggled to False when finished generating the Paillier privkey
+tlsver_in_config = None
 
 #TESTING only vars
 testing = False #toggled when we are running a test suite (developer only)
@@ -192,10 +193,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
                       'session_path':join(current_session_dir, 'mytrace')})
         return
     
-    def start_audit(self, args):
-        #set TLS version according to user preference
-        if int(shared.config.get("General","tls_11")):
-            shared.set_tlsver('\x03\x02')        
+    def start_audit(self, args):     
         arg1, arg2, arg3 = args.split('&')
         if not arg1.startswith('b64dercert=') or not arg2.startswith('b64headers=') or not arg3.startswith('ciphersuite='):
             self.respond({'response':'start_audit', 'status':'wrong HEAD parameter'})
@@ -212,9 +210,9 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
             use_paillier_scheme = True                
         if not use_paillier_scheme:
             if testing: 
-                tlsn_session = shared.TLSNClientSession(server_name, ccs=int(cs))
+                tlsn_session = shared.TLSNClientSession(server_name, ccs=int(cs), tlsver=tlsver_in_config)
             else: 
-                tlsn_session = shared.TLSNClientSession(server_name)
+                tlsn_session = shared.TLSNClientSession(server_name, tlsver=tlsver_in_config)
         else: #use_paillier_scheme
             if testing: 
                 tlsn_session = shared.TLSNClientSession_Paillier(server_name, ccs=int(cs))
@@ -436,7 +434,7 @@ def process_certificate_queue():
             continue
         print ('Preparing enc_pms in advance')        
         if not use_paillier_scheme:
-            tls_crypto = shared.TLSNClientSession()
+            tls_crypto = shared.TLSNClientSession(tlsver=tlsver_in_config)
             pms_secret, pms_padding_secret = prepare_pms()
             prepare_encrypted_pms(tls_crypto, cert_der, pms_secret, pms_padding_secret)
         else:
@@ -456,7 +454,7 @@ def prepare_pms():
     for i in range(10): #keep trying until reliable site check succeeds
         try:
             #first 4 bytes of client random are unix time
-            pms_session = shared.TLSNClientSession(rs_choice,shared.reliable_sites[rs_choice][0], ccs=53)
+            pms_session = shared.TLSNClientSession(rs_choice,shared.reliable_sites[rs_choice][0], ccs=53, tlsver=tlsver_in_config)
             if not pms_session: 
                 raise Exception("Client session construction failed in prepare_pms")
             tls_sock = shared.create_sock(pms_session.server_name,pms_session.ssl_port)
@@ -478,7 +476,7 @@ def prepare_pms():
             #judge success/fail based on whether a properly encoded 
             #Change Cipher Spec record is returned by the server (we could
             #also check the server finished, but it isn't necessary)
-            if not response.count(shared.TLSRecord(shared.chcis,f='\x01').serialized):
+            if not response.count(shared.TLSRecord(shared.chcis,f='\x01', tlsver=tlsver_in_config).serialized):
                 print ("PMS trial failed, retrying. (",binascii.hexlify(response),")")
                 continue
             return (pms_session.auditee_secret,pms_session.auditee_padding_secret)
@@ -1013,7 +1011,9 @@ if __name__ == "__main__":
     shared.load_program_config()
     #set TLS version according to user preference 	
     if int(shared.config.get("General","tls_11")): 		
-        shared.set_tlsver('\x03\x02')        
+        tlsver_in_config = bytearray('\x03\x02')
+    else:
+        tlsver_in_config = bytearray('\x03\x01')
     firefox_install_path = None
     if len(sys.argv) > 1: firefox_install_path = sys.argv[1]
     if firefox_install_path == 'test': firefox_install_path = None

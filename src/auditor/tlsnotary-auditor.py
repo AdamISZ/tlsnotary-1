@@ -55,13 +55,7 @@ def process_messages():
         #Receiving this data, the auditor generates his half of the 
         #premaster secret, and returns the hashed version, along with
         #the half-pms encrypted to the server's pubkey
-        if msg.startswith('rcr_rsr:'):
-            #reinitialise protocol version for each audit
-            if int(shared.config.get("General","tls_11")):
-                shared.set_tlsver('\x03\x02')
-            else:
-                shared.set_tlsver('\x03\x01')
-                
+        if msg.startswith('rcr_rsr:'):                
             msg_data = msg[len('rcr_rsr:'):]
             tlsn_session = shared.TLSNClientSession()
             rsp_session = shared.TLSNClientSession()
@@ -247,10 +241,10 @@ def process_messages():
                         decr_data[fname] = f.read()
                 for fname in ['sha1hmac','cr','sr']:
                     with open(os.path.join(commit_dir, fname+seqno), 'rb') as f: 
-                        decr_data[fname] = f.read()                    
-                decr_session = shared.TLSNClientSession(ccs = int(decr_data['cs']))
+                        decr_data[fname] = f.read()
+                tlsver = decr_data['response'][1:3]
+                decr_session = shared.TLSNClientSession(ccs = int(decr_data['cs']), tlsver=tlsver)
                 #update TLS protocol dynamically based on response content
-                shared.set_tlsver(decr_data['response'][1:3])                
                 decr_session.client_random = decr_data['cr']
                 decr_session.server_random = decr_data['sr']
                 decr_session.p_auditee = decr_data['md5hmac']
@@ -598,10 +592,7 @@ if __name__ == "__main__":
     from pyasn1.codec.der import encoder, decoder
     from slowaes import AESModeOfOperation
     import shared
-    shared.load_program_config()  
-    #set TLS version according to user preference 	
-    if int(shared.config.get("General","tls_11")): 		
-        shared.set_tlsver('\x03\x02')     
+    shared.load_program_config()   
     thread = shared.ThreadWithRetval(target= http_server)
     thread.daemon = True
     thread.start()

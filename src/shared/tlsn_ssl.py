@@ -91,7 +91,7 @@ def tls_record_decoder(d):
             raise Exception("incomplete TLS record")
         fragment = d[5:5+l]
         d = d[5+l:]
-        records.append(TLSRecord(rt, v=ver, f=fragment))        
+        records.append(TLSRecord(rt, tlsver=ver, f=fragment))        
     return (records,remaining)
 
 def tls_record_fragment_decoder(t,d, conn=None, ignore_mac = False):
@@ -134,9 +134,9 @@ def tls_record_fragment_decoder(t,d, conn=None, ignore_mac = False):
     return hlpos 
 
 class TLSRecord(object):
-    def __init__(self, ct, v=tlsn_common.tlsver, f=None):
+    def __init__(self, ct, f=None, tlsver=None):
         self.content_type = ct
-        self.content_version = tlsn_common.tlsver #updated in initialisation TODO
+        self.content_version = tlsver 
         if f:
             self.fragment = f
             self.length = len(self.fragment)
@@ -175,7 +175,7 @@ class TLSHandshake(object):
         
 
 class TLSClientHello(TLSHandshake):
-    def __init__(self,serialized = None,client_random = None, cipher_suites=tlsn_cipher_suites.keys()):
+    def __init__(self,serialized = None,client_random = None, cipher_suites=tlsn_cipher_suites.keys(), tlsver=None):
         if serialized:
             print ('Not implemented instantiation of client hello', 
                    'with serialization; this is a client-only',
@@ -187,7 +187,8 @@ class TLSClientHello(TLSHandshake):
                 cr_time = bi2ba(int(time.time()))
                 self.client_random = cr_time + os.urandom(28)
             #last byte is session id length
-            self.serialized = tlsn_common.tlsver + self.client_random + '\x00' 
+            self.tlsver = tlsver
+            self.serialized = self.tlsver + self.client_random + '\x00' 
             self.cipher_suites = cipher_suites
             self.serialized += '\x00'+chr(2*len(self.cipher_suites))
             for a in self.cipher_suites:
@@ -201,7 +202,7 @@ class TLSServerHello(TLSHandshake):
     def __init__(self,serialized = None,server_random = None, cipher_suite=None):
         if serialized:
             super(TLSServerHello,self).__init__(serialized,h_sh)
-            assert self.serialized[4:6] == tlsn_common.tlsver, "Invalid server hello message"
+            self.tlsver = self.serialized[4:6]
             self.server_random = self.serialized[6:38]
             self.session_id_length = ba2int(self.serialized[38])
             if self.session_id_length != 0:
@@ -330,7 +331,7 @@ class TLSConnectionState(object):
     for specific cases in TLSNotary, the mac check is delayed,
     hence mac failure is returned as False rather than raising
     an exception.'''
-    def __init__(self, cipher_suite, expanded_keys,is_client, no_enc=False):
+    def __init__(self, cipher_suite, expanded_keys,is_client, no_enc=False, tlsver=None):
         '''Provide the cipher suite as defined in the global
         cipher suite list.
         Currently only AES-CBC and RC4 cipher suites are
@@ -340,7 +341,7 @@ class TLSConnectionState(object):
         If mac failures occur they will be flagged but
         decrypted result is still made available.'''
         
-        self.tlsver = tlsn_common.tlsver #either TLS1.0 or 1.1
+        self.tlsver = tlsver #either TLS1.0 or 1.1
         assert self.tlsver in tls_versions, "Unrecognised or invalid TLS version"
         self.cipher_suite = cipher_suite
         self.end = 'client' if is_client else 'server'
@@ -365,7 +366,7 @@ class TLSConnectionState(object):
         assert self.mac_key, "Failed to build mac; mac key is missing"
         fragment_len = bi2ba(len(cleartext),fixed=2)  
         record_mac = hmac.new(self.mac_key,seq_no_bytes + record_type + \
-                    tlsn_common.tlsver+fragment_len + cleartext, self.mac_algo).digest()
+                    self.tlsver+fragment_len + cleartext, self.mac_algo).digest()
         return record_mac
     
     def mte(self,cleartext,rec_type):
@@ -446,19 +447,22 @@ class TLSConnectionState(object):
 hs_type_map = {h_ch:TLSClientHello,h_sh:TLSServerHello,h_cert:TLSCertificate,\
             h_cke:TLSClientKeyExchange,h_fin:TLSFinished,h_shd:TLSServerHelloDone}  
 
-def tls_sender(sckt,msg,rec_type,conn=None):
+def tls_sender(sckt,msg,rec_type,conn=None, tlsver=None):
     '''Wrap a message in a TLS Record before sending
     If conn argument provided, encrypt the payload
     before sending'''
     if conn:
         msg = conn.mte(msg,rec_type)
-    rec = TLSRecord(rec_type, f=msg)
+    rec = TLSRecord(rec_type, f=msg, tlsver=tlsver)
     sckt.send(rec.serialized)
     
 class TLSNClientSession(object):
-    def __init__(self,server=None,port=443,ccs=None):
+    def __init__(self,server=None,port=443,ccs=None, tlsver=None):
         self.server_name = server
         self.ssl_port = port
+        self.initial_tlsver = tlsver
+        #current TLS version may be downgraded
+        self.tlsver = tlsver
         self.n_auditee_entropy = 12
         self.n_auditor_entropy = 9
         self.auditor_secret = None
@@ -523,9 +527,9 @@ class TLSNClientSession(object):
           
     def start_handshake(self,sckt):  
         #replace tlsnotary-auditee start_tls()
-        self.client_hello = TLSClientHello(cipher_suites=self.offered_cipher_suites.keys()) 
+        self.client_hello = TLSClientHello(cipher_suites=self.offered_cipher_suites.keys(), tlsver=self.tlsver) 
         self.handshake_messages[0]= self.client_hello.serialized
-        tls_sender(sckt,self.handshake_messages[0],hs)
+        tls_sender(sckt,self.handshake_messages[0],hs, tlsver=self.tlsver)
         #the handshake messages: server hello, certificate, server hello done
         #may be packed in arbitrary groupings into the TLS records, since
         #they are all the same record type (Handshake)            
@@ -545,6 +549,16 @@ class TLSNClientSession(object):
         self.client_random = self.client_hello.client_random
         self.server_random = self.server_hello.server_random
         self.chosen_cipher_suite = self.server_hello.cipher_suite
+
+        if self.server_hello.tlsver != self.tlsver:
+            if self.server_hello.tlsver =='\x03\x01' and self.tlsver == '\x03\x02':
+                #server requested downgrade
+                #note that this can only happen *before* a TLSConnectionState object is
+                #initialised, so the tlsversion used in that object will be synchronised.
+                #TODO: error checking to make sure this is the case.
+                self.tlsver = bytearray('\x03\x01')
+            else:
+                raise Exception("Failed to negotiate valid TLS version with server")
         
         #for 'full' sessions, we can immediately precompute everything except
         #for finished, including the handshake hashes used to calc the Finished
@@ -599,10 +613,10 @@ class TLSNClientSession(object):
         self.handshake_messages[6] = self.client_finished.serialized
         #Note that the three messages cannot be packed into one record; 
         #change cipher spec is *not* a handshake message
-        tls_sender(sckt,self.handshake_messages[4],hs)
-        tls_sender(sckt,self.handshake_messages[5],chcis) 
+        tls_sender(sckt,self.handshake_messages[4],hs, tlsver=self.tlsver)
+        tls_sender(sckt,self.handshake_messages[5],chcis, tlsver=self.tlsver) 
         #client finished must be sent encrypted       
-        tls_sender(sckt,self.handshake_messages[6],hs, conn=self.client_connection_state)
+        tls_sender(sckt,self.handshake_messages[6],hs, conn=self.client_connection_state, tlsver=self.tlsver)
         records=[]
         while len(records) < 2:
             rspns = recv_socket(sckt,True)
@@ -645,10 +659,10 @@ class TLSNClientSession(object):
         self.handshake_messages[6] = self.client_finished.serialized
         #Note that the three messages cannot be packed into one record; 
         #change cipher spec is *not* a handshake message
-        tls_sender(sckt,self.handshake_messages[4],hs)
-        tls_sender(sckt,self.handshake_messages[5],chcis) 
+        tls_sender(sckt,self.handshake_messages[4],hs, tlsver=self.tlsver)
+        tls_sender(sckt,self.handshake_messages[5],chcis, tlsver=self.tlsver) 
         #client finished must be sent encrypted
-        tls_sender(sckt,self.handshake_messages[6],hs, conn=self.client_connection_state)
+        tls_sender(sckt,self.handshake_messages[6],hs, conn=self.client_connection_state, tlsver=self.tlsver)
         return recv_socket(sckt,True)
             
     def extract_mod_and_exp(self, certDER=None):
@@ -690,7 +704,7 @@ class TLSNClientSession(object):
     def set_enc_first_half_pms(self):
         assert (self.server_modulus and not self.enc_first_half_pms)
         ones_length = 23            
-        pms1 = tlsn_common.tlsver+self.auditee_secret + ('\x00' * (24-2-self.n_auditee_entropy))
+        pms1 = self.initial_tlsver+self.auditee_secret + ('\x00' * (24-2-self.n_auditee_entropy))
         self.enc_first_half_pms = pow(ba2int('\x02'+('\x01'*(ones_length))+\
         self.auditee_padding_secret+'\x00'+pms1 +'\x00'*23 + '\x01'), self.server_exponent, self.server_modulus)
      
@@ -701,7 +715,7 @@ class TLSNClientSession(object):
         premaster secret must be that used in the client hello message,
         not the negotiated/downgraded version set by the server hello. 
         See variable tlsver_ch.'''
-        tlsver_ch = tls_ver_1_1 if tlsn_common.config.get("General","tls_11") else tls_ver_1_0
+        tlsver_ch = self.initial_tlsver
         cr = self.client_random
         sr = self.server_random
         assert cr and sr,"one of client or server random not set"
@@ -833,8 +847,8 @@ class TLSNClientSession(object):
         #connection state. NOTE: Since this wipes/restarts the encryption 
         #connection state, a call to do_key_expansion automatically restarts
         #the session.
-        self.client_connection_state = TLSConnectionState(cs, key_accumulator,True, False)
-        self.server_connection_state = TLSConnectionState(cs, key_accumulator, False, False)
+        self.client_connection_state = TLSConnectionState(cs, key_accumulator,True, False, tlsver=self.tlsver)
+        self.server_connection_state = TLSConnectionState(cs, key_accumulator, False, False, tlsver=self.tlsver)
         return bytearray('').join(filter(None,key_accumulator))
     
     def get_verify_hmac(self,sha_verify=None,md5_verify=None,half=1,is_for_client=True):
@@ -864,7 +878,7 @@ class TLSNClientSession(object):
         will be less than 16kB and therefore only 1 SSL record.
         This can in principle be used more than once.'''
         self.tls_request = TLSAppData(cleartext)
-        tls_sender(sckt, self.tls_request.serialized, appd, conn=self.client_connection_state)
+        tls_sender(sckt, self.tls_request.serialized, appd, conn=self.client_connection_state, tlsver=self.tlsver)
 
     def store_server_app_data_records(self, response):
         #extract the ciphertext from the raw records as a list
@@ -887,12 +901,12 @@ class TLSNClientSession(object):
         ciphertexts = [] #each item contains a tuple (ciphertext, encryption_key, iv)
         last_ciphertext_block = self.IV_after_finished
         for appdata in self.server_response_app_data:
-            if tlsn_common.tlsver == tls_ver_1_0:
+            if self.tlsver == tls_ver_1_0:
                 ciphertexts.append( (appdata.serialized, 
                                  self.server_connection_state.enc_key, 
                                  last_ciphertext_block) )
                 last_ciphertext_block = appdata.serialized[-aes_block_size:]
-            elif tlsn_common.tlsver == tls_ver_1_1:
+            elif self.tlsver == tls_ver_1_1:
                 ciphertexts.append((appdata.serialized[aes_block_size:],
                                     self.server_connection_state.enc_key,
                                     appdata.serialized[:aes_block_size]))
@@ -908,7 +922,7 @@ class TLSNClientSession(object):
         #and run each plaintext through, checking the mac each time
         dummy_connection_state = TLSConnectionState(self.chosen_cipher_suite, 
                                                    self.server_mac_key, 
-                                                   is_client=False, no_enc=True)
+                                                   is_client=False, no_enc=True, tlsver=self.tlsver)
         validity, fintext = \
         dummy_connection_state.verify_mac(self.server_finished.serialized+\
                                           self.server_finished.recorded_mac,hs)
