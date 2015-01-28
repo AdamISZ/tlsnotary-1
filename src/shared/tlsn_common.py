@@ -10,6 +10,12 @@ import select, time, socket
 config = SafeConfigParser()
 config_location = os.path.join(os.path.dirname(os.path.realpath(__file__)),'tlsnotary.ini')
 
+#globals set depending on configfile. default values here:
+tlsver = bytearray('\x03\x02')
+use_gzip = True
+use_slowaes = False
+use_paillier = False
+
 required_options = {'IRC':['irc_server','irc_port','channel_name']}
 
 reliable_sites = {}
@@ -156,6 +162,11 @@ def loadto_getlink(mfile, rg, rp):
 #end file transfer functions
 
 def load_program_config():    
+    global tlsver
+    global use_gzip
+    global use_slowaes
+    global use_paillier
+
     loadedFiles = config.read([config_location])
     #detailed sanity checking :
     #did the file exist?
@@ -170,6 +181,16 @@ def load_program_config():
         for o in v:
             if o not in config.options(k):
                 raise Exception("Config file does not contain the required option: "+o)
+
+    #override defaults if config options changed
+    if int(config.get("General","tls_11")) == 0: 		
+        tlsver = bytearray('\x03\x01')
+    if int(config.get("General","decrypt_with_slowaes")) == 1:
+        use_slowaes = True
+    if int(config.get("General","gzip_disabled")) == 1:
+        use_gzip = False
+    if int(config.get("General","use_paillier_scheme")) == 1:
+        use_paillier = True
 
 
 def import_reliable_sites(d):

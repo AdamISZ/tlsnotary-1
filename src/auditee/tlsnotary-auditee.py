@@ -53,7 +53,6 @@ audit_no = 0 #we may be auditing multiple URLs. This var keeps track of how many
 paillier_private_key = None #Auditee's private key. Used for paillier_scheme.
 #Generated only once and is reused until the end of the auditing session
 b_paillier_privkey_being_generated = True #toggled to False when finished generating the Paillier privkey
-tlsver_in_config = None
 
 #TESTING only vars
 testing = False #toggled when we are running a test suite (developer only)
@@ -178,7 +177,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         return
     
     def start_peer_connection(self):
-        if int(shared.config.get("General","use_paillier_scheme")):
+        if shared.use_paillier:
             paillier_gen_privkey()
         rv = start_peer_messaging()
         rv2 = peer_handshake()
@@ -205,14 +204,11 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         headers = b64decode(b64headers)
         
         server_name, modified_headers = parse_headers(headers)
-        use_paillier_scheme = False
-        if int(shared.config.get("General","use_paillier_scheme")):
-            use_paillier_scheme = True                
-        if not use_paillier_scheme:
+        if not shared.use_paillier:
             if testing: 
-                tlsn_session = shared.TLSNClientSession(server_name, ccs=int(cs), tlsver=tlsver_in_config)
+                tlsn_session = shared.TLSNClientSession(server_name, ccs=int(cs), tlsver=shared.tlsver)
             else: 
-                tlsn_session = shared.TLSNClientSession(server_name, tlsver=tlsver_in_config)
+                tlsn_session = shared.TLSNClientSession(server_name, tlsver=shared.tlsver)
         else: #use_paillier_scheme
             if testing: 
                 tlsn_session = shared.TLSNClientSession_Paillier(server_name, ccs=int(cs))
@@ -226,7 +222,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         #if the enc_pms hasn't yet been prepared
         if not dercert in certs_and_enc_pms:
             print ('Preparing enc_pms')
-            if not use_paillier_scheme:
+            if not shared.use_paillier:
                 pms_secret, pms_padding_secret = prepare_pms()
                 prepare_encrypted_pms(tlsn_session, dercert, pms_secret, pms_padding_secret)
             else: #use_paillier_scheme:
@@ -318,7 +314,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
     
     def send_certificate(self, b64cert):
         #we don't want to cache enc_pmss as it would take too long in paillier scheme
-        if int(shared.config.get("General","use_paillier_scheme")):
+        if shared.use_paillier:
             return
         cert_queue.put(b64cert)
         #no need to respond, nobody cares
@@ -409,10 +405,7 @@ def process_certificate_queue():
         time.sleep(0.1)
     #when peer is connected we dont want to immediately send certs (if any)
     #because auditor needs a couple of seconds to setup
-    time.sleep(2)
-    use_paillier_scheme = False
-    if int(shared.config.get("General","use_paillier_scheme")):
-        use_paillier_scheme = True                    
+    time.sleep(2)                   
     while True:
         #dummy class only to get enc_pms, use new one each iteration just in case     
         b64cert = cert_queue.get()
@@ -433,8 +426,8 @@ def process_certificate_queue():
             b_comm_channel_busy = False            
             continue
         print ('Preparing enc_pms in advance')        
-        if not use_paillier_scheme:
-            tls_crypto = shared.TLSNClientSession(tlsver=tlsver_in_config)
+        if not shared.use_paillier:
+            tls_crypto = shared.TLSNClientSession(tlsver=shared.tlsver)
             pms_secret, pms_padding_secret = prepare_pms()
             prepare_encrypted_pms(tls_crypto, cert_der, pms_secret, pms_padding_secret)
         else:
@@ -454,7 +447,7 @@ def prepare_pms():
     for i in range(10): #keep trying until reliable site check succeeds
         try:
             #first 4 bytes of client random are unix time
-            pms_session = shared.TLSNClientSession(rs_choice,shared.reliable_sites[rs_choice][0], ccs=53, tlsver=tlsver_in_config)
+            pms_session = shared.TLSNClientSession(rs_choice,shared.reliable_sites[rs_choice][0], ccs=53, tlsver=shared.tlsver)
             if not pms_session: 
                 raise Exception("Client session construction failed in prepare_pms")
             tls_sock = shared.create_sock(pms_session.server_name,pms_session.ssl_port)
@@ -476,7 +469,7 @@ def prepare_pms():
             #judge success/fail based on whether a properly encoded 
             #Change Cipher Spec record is returned by the server (we could
             #also check the server finished, but it isn't necessary)
-            if not response.count(shared.TLSRecord(shared.chcis,f='\x01', tlsver=tlsver_in_config).serialized):
+            if not response.count(shared.TLSRecord(shared.chcis,f='\x01', tlsver=shared.tlsver).serialized):
                 print ("PMS trial failed, retrying. (",binascii.hexlify(response),")")
                 continue
             return (pms_session.auditee_secret,pms_session.auditee_padding_secret)
@@ -599,7 +592,7 @@ def stop_recording():
 def parse_headers(headers):
     header_lines = headers.split('\r\n') #no new line issues; it was constructed like that
     server = header_lines[1].split(':')[1].strip()
-    if int(shared.config.get("General","gzip_disabled")) != 0:
+    if not shared.use_gzip:
         modified_headers = '\r\n'.join([x for x in header_lines if 'gzip' not in x])
     else:
         modified_headers = '\r\n'.join(header_lines)
@@ -694,8 +687,7 @@ def decrypt_html(sha1hmac, tlsn_session,sf):
     tlsn_session.set_master_secret_half() #without arguments sets the whole MS
     tlsn_session.do_key_expansion() #also resets encryption connection state
     
-    if int(shared.config.get("General","decrypt_with_slowaes")) or \
-       not tlsn_session.chosen_cipher_suite in [47,53]:
+    if shared.use_slowaes or not tlsn_session.chosen_cipher_suite in [47,53]:
         #either using slowAES or a RC4 ciphersuite
         plaintext,bad_mac = tlsn_session.process_server_app_data_records()
         if bad_mac: print ("WARNING! Plaintext is not authenticated.")        
@@ -711,7 +703,7 @@ def decrypt_html(sha1hmac, tlsn_session,sf):
         plaintext = tlsn_session.mac_check_plaintexts(raw_plaintexts)
 
     plaintext = shared.dechunk_http(plaintext)
-    if int(shared.config.get("General","gzip_disabled")) == 0:    
+    if shared.use_gzip:    
         plaintext = shared.gunzip_http(plaintext)
 
     with open(join(current_session_dir,'session_dump'+sf),'wb') as f: f.write(tlsn_session.dump())
@@ -856,7 +848,7 @@ def start_firefox(FF_to_backend_port, firefox_install_path, AES_decryption_port)
 
     os.putenv('FF_to_backend_port', str(FF_to_backend_port))
     os.putenv('FF_first_window', 'true')   #prevents addon confusion when websites open multiple FF windows
-    if int(shared.config.get("General","decrypt_with_slowaes")) == 0:
+    if not shared.use_slowaes:
         os.putenv('TLSNOTARY_USING_BROWSER_AES_DECRYPTION', 'true')
         os.putenv('TLSNOTARY_AES_DECRYPTION_PORT', str(AES_decryption_port))
 
@@ -1009,11 +1001,6 @@ if __name__ == "__main__":
     from slowaes import AESModeOfOperation        
     import shared
     shared.load_program_config()
-    #set TLS version according to user preference 	
-    if int(shared.config.get("General","tls_11")): 		
-        tlsver_in_config = bytearray('\x03\x02')
-    else:
-        tlsver_in_config = bytearray('\x03\x01')
     firefox_install_path = None
     if len(sys.argv) > 1: firefox_install_path = sys.argv[1]
     if firefox_install_path == 'test': firefox_install_path = None
@@ -1078,7 +1065,7 @@ if __name__ == "__main__":
     thread.start()
     
     AES_decryption_port = None
-    if int(shared.config.get("General","decrypt_with_slowaes")) == 0:
+    if not shared.use_slowaes:
         #We want AES decryption to be done fast in browser's JS instead of in python.
         #We start a server which sends ciphertexts to browser                
         thread_aes = shared.ThreadWithRetval(target=aes_decryption_thread)
