@@ -897,58 +897,31 @@ def start_firefox(FF_to_backend_port, firefox_install_path, AES_decryption_port)
     return ('success', ff_proc)
     
 #HTTP server to talk with Firefox addon
-def http_server(parentthread):    
-    #allow three attempts in case if the port is in use
-    b_was_started = False
-    for i in range(3):
-        FF_to_backend_port = random.randint(1025,65535)
-        print ('Starting http server to communicate with Firefox addon')
-        try:
-            httpd = shared.StoppableHttpServer(('127.0.0.1', FF_to_backend_port), HandleBrowserRequestsClass)
-            b_was_started = True
-            break
-        except Exception, e:
-            print ('Error starting mini http server. Maybe the port is in use?', e,end='\r\n')
-            continue
-    if b_was_started == False:
-        #retval is a var that belongs to our parent class which is ThreadWithRetval
+def http_server(parentthread): 
+    print ('Starting http server to communicate with Firefox addon')
+    try:
+        httpd = shared.StoppableHttpServer(('127.0.0.1', 0), HandleBrowserRequestsClass)
+    except Exception, e:
         parentthread.retval = ('failure',)
         return
-    #Let the invoking thread know that we started successfully
-    parentthread.retval = ('success', FF_to_backend_port)
-    sa = httpd.socket.getsockname()
-    print ('Serving HTTP on', sa[0], 'port', sa[1], '...',end='\r\n')
+    #Caller checks thread.retval for httpd status
+    parentthread.retval = ('success', httpd.server_port)
+    print ('Serving HTTP on port ', str(httpd.server_port), end='\r\n')
     httpd.serve_forever()
-    return
 
 
-#Used only for testing
 #use miniHTTP server to receive commands from Firefox addon and respond to them
 def aes_decryption_thread(parentthread):    
-    #allow three attempts to start mini httpd in case if the port is in use
-    b_was_started = False
-    for i in range(3):
-        AES_decryption_port = random.randint(1025,65535)
-        print ('Starting AES decryption server')
-        try:
-            aes_httpd = shared.StoppableHttpServer(('127.0.0.1', AES_decryption_port), HandlerClass_aes)
-            b_was_started = True
-            break
-        except Exception, e:
-            print ('Error starting AES decryption server. Maybe the port is in use?', e,end='\r\n')
-            continue
-    if b_was_started == False:
-        #retval is a var that belongs to our parent class which is ThreadWithRetval
+    print ('Starting AES decryption server')
+    try:
+        aes_httpd = shared.StoppableHttpServer(('127.0.0.1', 0), HandlerClass_aes)
+    except Exception, e:
         parentthread.retval = ('failure',)
         return
-    #elif minihttpd started successfully
-    #Let the invoking thread know that we started successfully
-    parentthread.retval = ('success', AES_decryption_port)
-    sa = aes_httpd.socket.getsockname()
-    print ("decrypting AES on", sa[0], "port", sa[1], "...",end='\r\n')
+    #Caller checks thread.retval for httpd status
+    parentthread.retval = ('success',  aes_httpd.server_port)
+    print ('Receiving decrypted AES on port ', str(aes_httpd.server_port), end='\r\n')
     aes_httpd.serve_forever()
-    return
-
 
 
 #Sending links (urls) to files passed from auditee to

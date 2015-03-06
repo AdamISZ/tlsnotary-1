@@ -538,31 +538,20 @@ def start_peer_messaging():
     return 'success'
 
 #use http server to talk to auditor.html
-def http_server(parentthread):    
-    #allow three attempts to start mini httpd in case if the port is in use
-    b_was_started = False
+def http_server(parentthread): 
     print ('Starting http server to communicate with auditor panel')    
-    for i in range(3):
-        FF_to_backend_port = random.randint(1025,65535)
-        #for the GET request, serve files only from within the datadir
-        os.chdir(datadir)
-        try: httpd = shared.StoppableThreadedHttpServer(('127.0.0.1', FF_to_backend_port), Handler)
-        except Exception, e:
-            print ('Error starting mini http server. Maybe the port is in use?', e,end='\r\n')
-            continue
-        b_was_started = True
-        break        
-    if b_was_started == False:
-        #retval is a var that belongs to our parent class which is ThreadWithRetval
-        parentthread.retval = ('failure',)
-        return
-    #elif minihttpd started successfully
-    #Let the invoking thread know that we started successfully the calling process can check thread.retval
-    parentthread.retval = ('success', FF_to_backend_port)
-    sa = httpd.socket.getsockname()
-    print ("Serving HTTP on", sa[0], "port", sa[1], "...",end='\r\n')
+    #for the GET request, serve files only from within the datadir
+    os.chdir(datadir)
+    try: 
+        httpd = shared.StoppableThreadedHttpServer(('127.0.0.1', 0), Handler)
+    except Exception, e:
+        print ('Error starting mini http server', e, end='\r\n')
+        exit(1)
+   #Caller checks thread.retval for httpd status
+    parentthread.retval = ('success', httpd.server_port)
+    print ("Serving HTTP on", str(httpd.server_port), end='\r\n') 
     httpd.serve_forever()
-    return
+
 
 #unpack and check validity of Python modules
 def first_run_check(modname,modhash):
