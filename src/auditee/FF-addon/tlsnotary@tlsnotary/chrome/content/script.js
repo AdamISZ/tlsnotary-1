@@ -264,7 +264,7 @@ function startAudit(urldata){
 
 function responseStartAudit(iteration){
     if (typeof iteration == "number"){
-        if (iteration > 100){
+        if (iteration > 200){
 	    notBarShow("ERROR: responseStartAudit timed out",false);
             return;
         }
