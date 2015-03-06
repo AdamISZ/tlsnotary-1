@@ -158,8 +158,8 @@ class TLSHandshake(object):
             assert self.handshake_type in [h_ch,h_sh,h_shd,h_cert,h_cke,h_fin],\
                    'Unrecognized or unimplemented handshake type'
             self.handshake_record_length = ba2int(self.serialized[1:4])
-            assert len(self.serialized[4:])>=self.handshake_record_length,\
-                   'Invalid handshake message length'
+            if len(self.serialized[4:]) < self.handshake_record_length:
+                raise Exception ('Invalid handshake message length')
             self.discarded = self.serialized[4+self.handshake_record_length:]
             if self.discarded:
                 print ('Info: got a discarded data when constructing',

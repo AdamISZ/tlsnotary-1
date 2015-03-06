@@ -56,6 +56,7 @@ b_paillier_privkey_being_generated = True #toggled to False when finished genera
 
 #TESTING only vars
 testing = False #toggled when we are running a test suite (developer only)
+randomtest = False #randomly toggle some options from ini file
 aes_ciphertext_queue = Queue.Queue() #testing only: receive one ciphertext 
 aes_cleartext_queue = Queue.Queue() #testing only: and put one cleartext
 b_awaiting_cleartext = False #testing only: used for sanity check on HandlerClass_aes
@@ -202,7 +203,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         cs = arg3[len('ciphersuite='):] #used for testing, empty otherwise        
         dercert = b64decode(b64dercert)
         headers = b64decode(b64headers)
-        
+
         server_name, modified_headers = parse_headers(headers)
         if not shared.use_paillier:
             if testing: 
@@ -211,9 +212,9 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
                 tlsn_session = shared.TLSNClientSession(server_name, tlsver=shared.tlsver)
         else: #use_paillier_scheme
             if testing: 
-                tlsn_session = shared.TLSNClientSession_Paillier(server_name, ccs=int(cs))
+                tlsn_session = shared.TLSNClientSession_Paillier(server_name, ccs=int(cs), tlsver=shared.tlsver)
             else: 
-                tlsn_session = shared.TLSNClientSession_Paillier(server_name)                
+                tlsn_session = shared.TLSNClientSession_Paillier(server_name, tlsver=shared.tlsver)
 
         global b_comm_channel_busy
         while b_comm_channel_busy:
@@ -263,12 +264,27 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
             try:
                 rv = decrypt_html(commit_session(tlsn_session, response,sf), tlsn_session, sf)
                 break
-            except:
+            except Exception, e:
                 if i == 9:
                     raise Exception('Audit failed')
                 print ('Exception caught while sending a commit to peer, retrying...', e)
                 continue
         b_comm_channel_busy = False
+
+        if randomtest:
+            #set random values before the next page begins to be audited
+            shared.use_gzip = (True, False)[random.randint(0,1)]
+            shared.use_slowaes = (True, False)[random.randint(0,1)]
+            #we dont want to use paillier too often because it takes 2 minutes for 1 audit
+            shared.use_paillier = (True, False, False, False, False, False)[random.randint(0,5)]
+            shared.tlsver = (bytearray('\x03\x01'), bytearray('\x03\x02'))[random.randint(0,1)]
+            if shared.use_paillier:
+                #in normal mode, paillier key is generated as soon as we start p2p connection
+                #however, in randomtest it is cleaner to generate it on first use
+                if not paillier_private_key:
+                    paillier_gen_privkey()
+            print('use_gzip', shared.use_gzip, 'use_slowaes', shared.use_slowaes, 'tlsver', shared.tlsver, 'use_paillier',  shared.use_paillier)
+          
         if rv[0] == 'success': html_paths = b64encode(rv[1])
         self.respond({'response':'start_audit', 'status':rv[0],'html_paths':html_paths})
         return           
@@ -425,13 +441,14 @@ def process_certificate_queue():
         if len(certs_and_enc_pms) > 0:
             b_comm_channel_busy = False            
             continue
-        print ('Preparing enc_pms in advance')        
+        print ('Preparing enc_pms in advance')   
+        
         if not shared.use_paillier:
             tls_crypto = shared.TLSNClientSession(tlsver=shared.tlsver)
             pms_secret, pms_padding_secret = prepare_pms()
             prepare_encrypted_pms(tls_crypto, cert_der, pms_secret, pms_padding_secret)
         else:
-            tls_crypto = shared.TLSNClientSession_Paillier()   
+            tls_crypto = shared.TLSNClientSession_Paillier(tlsver=shared.tlsver)
             pms_secret = tls_crypto.auditee_secret
             pms_padding_secret = tls_crypto.auditee_padding_secret
             paillier_prepare_encrypted_pms(tls_crypto, cert_der)
@@ -520,32 +537,38 @@ def paillier_prepare_encrypted_pms(tlsn_session, cert_der):
         print ('Paillier private key generated! Continuing.')  
     print ('Preparing enc_pms using Paillier. This usually takes 2 minutes')
     assert paillier_private_key
-    scheme = shared.Paillier_scheme_auditee(paillier_private_key)
-    data_for_auditor = scheme.get_data_for_auditor(tlsn_session.auditee_padded_rsa_half, N_ba)
-    data_file = join(current_session_dir, 'paillier_data')
-    with open(data_file, 'wb') as f: f.write(data_for_auditor)
-    try: 
-        link = shared.sendspace_getlink(data_file, requests.get, requests.post)
-    except:
-        raise Exception('Could not use sendspace')  
-    reply = send_and_recv('p_link:'+link, timeout=200)
-    if reply[0] != 'success':
-        raise Exception ('Failed to receive a reply for p_link:')
-    
-    for i in range(8):
-        if not reply[1].startswith('p_round_or'+str(i)+':'):
-            return 'bad reply. Expected p_round_or'+str(i)+':'
-        E_ba = reply[1][len('p_round_or'+str(i)+':'):]
-        F_ba = shared.bi2ba( scheme.do_round(i, shared.ba2int(E_ba)), fixed=513)
-        reply = send_and_recv('p_round_ee'+str(i)+':'+F_ba)
-        if reply[0] != 'success': 
-            raise Exception ('Failed to receive a reply for p_round_ee'+str(i)+':')
-   
-    if not reply[1].startswith('p_round_or8:'):
-        raise Exception ('bad reply. Expected p_round_or8:')
-    PSum_ba = reply[1][len('p_round_or8:'):]
-    enc_pms = scheme.do_ninth_round(shared.ba2int(PSum_ba))    
-    tlsn_session.enc_pms = enc_pms
+    for i in range(10):
+        try:
+            scheme = shared.Paillier_scheme_auditee(paillier_private_key)
+            data_for_auditor = scheme.get_data_for_auditor(tlsn_session.auditee_padded_rsa_half, N_ba)
+            data_file = join(current_session_dir, 'paillier_data')
+            with open(data_file, 'wb') as f: f.write(data_for_auditor)
+            try: 
+                link = shared.sendspace_getlink(data_file, requests.get, requests.post)
+            except:
+                raise Exception('Could not use sendspace')  
+            reply = send_and_recv('p_link:'+link, timeout=200)
+            if reply[0] != 'success':
+                raise Exception ('Failed to receive a reply for p_link:')
+            
+            for i in range(8):
+                if not reply[1].startswith('p_round_or'+str(i)+':'):
+                    raise Exception('bad reply. Expected p_round_or'+str(i)+' but got', reply[1][:20])
+                E_ba = reply[1][len('p_round_or'+str(i)+':'):]
+                F_ba = shared.bi2ba( scheme.do_round(i, shared.ba2int(E_ba)), fixed=513)
+                reply = send_and_recv('p_round_ee'+str(i)+':'+F_ba, timeout=10)
+                if reply[0] != 'success': 
+                    raise Exception ('Failed to receive a reply for p_round_ee'+str(i)+':')
+           
+            if not reply[1].startswith('p_round_or8:'):
+                raise Exception ('bad reply. Expected p_round_or8 but got', reply[1])
+            PSum_ba = reply[1][len('p_round_or8:'):]
+            enc_pms = scheme.do_ninth_round(shared.ba2int(PSum_ba))    
+            tlsn_session.enc_pms = enc_pms
+            break
+        except Exception, exc:
+            print ('Exception in paillier_prepare_encrypted_pms, retrying...', exc)
+            continue
 
     
 #peer messaging protocol
@@ -625,7 +648,7 @@ def negotiate_crippled_secrets(tlsn_session, tls_sock):
     if reply[0] != 'success': 
         raise Exception ('Failed to receive a reply for cs_cr_sr_hmacms_verifymd5sha:')
     if not reply[1].startswith('hmacms_hmacek_hmacverify:'):
-        raise Exception ('bad reply. Expected hmacms_hmacek_hmacverify: but got reply[1]')
+        raise Exception ('bad reply. Expected hmacms_hmacek_hmacverify but got', reply[1])
     reply_data = reply[1][len('hmacms_hmacek_hmacverify:'):]
     expanded_key_len = shared.tlsn_cipher_suites[tlsn_session.chosen_cipher_suite][-1]
     if len(reply_data) != 24+expanded_key_len+12:
@@ -984,7 +1007,10 @@ def start_testing():
 
  
 if __name__ == "__main__":
-    if ('test' in sys.argv): testing = True    
+    if ('test' in sys.argv): testing = True
+    if ('randomtest' in sys.argv): 
+        testing = True
+        randomtest = True
     #for md5 hash, see https://pypi.python.org/pypi/<module name>/<module version>
     modules_to_load = {'rsa-3.1.4':'b6b1c80e1931d4eba8538fd5d4de1355',\
                        'pyasn1-0.1.7':'2cbd80fcd4c7b1c82180d3d76fee18c8',\
@@ -1003,7 +1029,7 @@ if __name__ == "__main__":
     shared.load_program_config()
     firefox_install_path = None
     if len(sys.argv) > 1: firefox_install_path = sys.argv[1]
-    if firefox_install_path == 'test': firefox_install_path = None
+    if firefox_install_path in ('test', 'randomtest'): firefox_install_path = None
     
     if not firefox_install_path:
         if OS=='linux':
