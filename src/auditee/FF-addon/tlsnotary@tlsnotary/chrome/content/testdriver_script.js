@@ -153,19 +153,7 @@ function openNextLink(){
         tlsnStopRecord();
         return;
     }
-    //set the cipher suite to be ONLY that in the given argument
-    var cs = tlsnCipherSuiteList[tlsnLinkIndex];
-    //iterate over keys of associative array
-    for (var key in tlsnCipherSuiteNames){
-        if (key==cs){
-            prefs.setBoolPref(tlsnCipherSuiteNames[key], true);
-        }
-        else {
-            prefs.setBoolPref(tlsnCipherSuiteNames[key], false);
-        }
-    }
-    
-    current_ciphersuite = cs;
+    current_ciphersuite = tlsnCipherSuiteList[tlsnLinkIndex];
     auditeeBrowser = gBrowser.addTab(linkArray[tlsnLinkIndex]);
     gBrowser.addProgressListener(tlsnLoadListener);
     gBrowser.removeAllTabsBut(auditeeBrowser);
