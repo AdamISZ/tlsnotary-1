@@ -72,6 +72,7 @@ function init(){
 	atob = win.atob;
 	alert = win.alert;
 	
+	check_addon_mode();
 	setPrefs();
 	//start waiting
 	setTimeout(startListening,500);
@@ -83,6 +84,103 @@ function init(){
 	}
 }
 
+
+var dsprops;
+var ProfilePath;
+var profile_dir;
+var src_dir;
+var py_dir;
+var portsfile;
+var filesdir;
+var process;
+var py_exe;
+var auditee_py;
+var arguments;
+function check_addon_mode(){
+	//**** get profile folder path ****
+	dsprops = Cc['@mozilla.org/file/directory_service;1'].getService(Ci.nsIProperties);
+	ProfilePath = dsprops.get("ProfD", Ci.nsIFile).path;
+	//**** initialize file ****
+	profile_dir = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsILocalFile);
+	profile_dir.initWithPath(ProfilePath);
+	//**** append each step in the path ****
+	src_dir = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsILocalFile);
+	py_dir = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsILocalFile);
+	portsfile = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsILocalFile);
+	src_dir.initWithPath(ProfilePath);
+	src_dir.append("extensions");
+	src_dir.append("tlsnotary@tlsnotary");
+	src_dir.append("src");
+
+	py_dir.initWithPath(ProfilePath);
+	py_dir.append("extensions");
+	py_dir.append("tlsnotary@tlsnotary");
+	py_dir.append("Python27");
+
+	if (src_dir.exists()){
+		filesdir = profile_dir.clone();
+		filesdir.append("tlsnotary_files");
+		if (! filesdir.exists()){
+			filesdir.create(filesdir.DIRECTORY_TYPE, 0775);
+			src_dir.copyTo(filesdir, null);
+			py_dir.copyTo(filesdir, null);
+		}
+		var os = Cc["@mozilla.org/xre/app-info;1"].getService(Ci.nsIXULRuntime).OS; 
+		process = Cc['@mozilla.org/process/util;1'].getService(Ci.nsIProcess);
+		py_exe = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsILocalFile);
+		if (os == "WINNT"){
+			py_exe = py_dir.clone();
+			py_exe.append("python.exe");
+		}
+		else {
+			py_exe.initWithPath("/usr/bin/python");
+		}
+		process.init(py_exe);
+		auditee_py = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsILocalFile);
+		auditee_py = filesdir.clone();
+		auditee_py.append("src");
+		auditee_py.append("auditee");
+		auditee_py.append("tlsnotary-auditee.py");
+		arguments= [auditee_py.path,"mode=addon"] ; // command line arguments array
+		portsfile.initWithPath(filesdir.path);
+		portsfile.append("src");
+		portsfile.append("auditee");
+		portsfile.append("ports");
+		//python will create these files
+		if (portsfile.exists()){
+			portsfile.remove(false);
+		}
+		process.run(false, arguments, arguments.length);
+		//cannot use win.setTimeout, so using FF's built-in
+		//let timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
+		//timer.initWithCallback({ notify: checkports }, 1000, Ci.nsITimer.TYPE_ONE_SHOT);
+		setTimeout(checkports, 1000);
+		Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment).set("TLSNOTARY_ADDON_MODE", "true");
+	}
+}
+
+
+var ports_str;
+var fstream;
+var sstream;
+function checkports(){
+	if (portsfile.exists() && portsfile.isReadable()){
+		fstream = Cc["@mozilla.org/network/file-input-stream;1"].createInstance(Ci.nsIFileInputStream);
+		sstream = Cc["@mozilla.org/scriptableinputstream;1"].createInstance(Ci.nsIScriptableInputStream);
+		fstream.init(portsfile, -1, 0, 0);
+		sstream.init(fstream);
+		ports_str = sstream.read(4096);
+		port = ports_str.split(" ")[0];
+		//set the envvar for auditee.html to know the port
+		Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment).set("FF_to_backend_port", port);
+		decr_port = ports_str.split(" ")[1];
+	}
+	else {
+		//let timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
+		//timer.initWithCallback({ notify: checkports }, 1000, Ci.nsITimer.TYPE_ONE_SHOT);
+		setTimeout(checkports, 1000);
+	}
+}
 
 
 function popupShow(text) {
@@ -163,11 +261,8 @@ function pollEnvvar(){
 	}
 	
 	notBarShow("Go to a page and press AUDIT THIS PAGE. Then wait for the page to reload automatically.",true);
-	
-	if (envvar.get("TLSNOTARY_USING_BROWSER_AES_DECRYPTION") == 'true'){
-		startDecryptionProcess();
-	}
-
+	if (decr_port != ""){
+		startDecryptionProcess();}
 }
 
 
@@ -544,7 +639,6 @@ prefs.setBoolPref("network.http.use-cache", false);
 //This must be at the bottom, otherwise we'd have to define each function
 //before it gets used.
 init();
-
 
 } catch (e){
 	script_exception = e;

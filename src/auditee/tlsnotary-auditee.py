@@ -994,6 +994,10 @@ if __name__ == "__main__":
     if ('randomtest' in sys.argv): 
         testing = True
         randomtest = True
+    if ('mode=addon' in sys.argv): 
+        mode='addon'
+    else:
+        mode='normal'
     #for md5 hash, see https://pypi.python.org/pypi/<module name>/<module version>
     modules_to_load = {'rsa-3.1.4':'b6b1c80e1931d4eba8538fd5d4de1355',\
                        'pyasn1-0.1.7':'2cbd80fcd4c7b1c82180d3d76fee18c8',\
@@ -1025,41 +1029,41 @@ if __name__ == "__main__":
     if len(sys.argv) > 1: firefox_install_path = sys.argv[1]
     if firefox_install_path in ('test', 'randomtest'): firefox_install_path = None
     
-    if not firefox_install_path:
-        if OS=='linux':
-            if not os.path.exists('/usr/lib/firefox'):
-                raise Exception ("Could not set firefox install path")
-            firefox_install_path = '/usr/lib/firefox'
-        elif OS=='mswin':
-            bFound = False
-            prog64 = os.getenv('ProgramW6432')
-            prog32 = os.getenv('ProgramFiles(x86)')
-            progxp = os.getenv('ProgramFiles')			
-            if prog64:
-                if os.path.exists(join(prog64,'Mozilla Firefox')):
-                    firefox_install_path = join(prog64,'Mozilla Firefox')
-                    bFound = True
-            if not bFound and prog32:
-                if os.path.exists(join(prog32,'Mozilla Firefox')):
-                    firefox_install_path = join(prog32,'Mozilla Firefox')
-                    bFound = True
-            if not bFound and progxp:
-                if os.path.exists(join(progxp,'Mozilla Firefox')):
-                    firefox_install_path = join(progxp,'Mozilla Firefox')
-                    bFound = True
-            if not bFound:
-                raise Exception('Could not set firefox install path')
-        elif OS=='macos':
-            if not os.path.exists(join("/","Applications","Firefox.app")):
-                raise Exception('''Could not set firefox install path. 
-                Please make sure Firefox is in your Applications folder''')
-            firefox_install_path = join("/","Applications","Firefox.app")
-        else:
-            raise Exception("Unrecognised operating system.")
-        
-    print ("Firefox install path is: ",firefox_install_path)
-    if not os.path.exists(firefox_install_path): 
-        raise Exception ("Could not find Firefox installation")
+    if mode == 'normal':
+        if not firefox_install_path:
+            if OS=='linux':
+                if not os.path.exists('/usr/lib/firefox'):
+                    raise Exception ("Could not set firefox install path")
+                firefox_install_path = '/usr/lib/firefox'
+            elif OS=='mswin':
+                bFound = False
+                prog64 = os.getenv('ProgramW6432')
+                prog32 = os.getenv('ProgramFiles(x86)')
+                progxp = os.getenv('ProgramFiles')			
+                if prog64:
+                    if os.path.exists(join(prog64,'Mozilla Firefox')):
+                        firefox_install_path = join(prog64,'Mozilla Firefox')
+                        bFound = True
+                if not bFound and prog32:
+                    if os.path.exists(join(prog32,'Mozilla Firefox')):
+                        firefox_install_path = join(prog32,'Mozilla Firefox')
+                        bFound = True
+                if not bFound and progxp:
+                    if os.path.exists(join(progxp,'Mozilla Firefox')):
+                        firefox_install_path = join(progxp,'Mozilla Firefox')
+                        bFound = True
+                if not bFound:
+                    raise Exception('Could not set firefox install path')
+            elif OS=='macos':
+                if not os.path.exists(join("/","Applications","Firefox.app")):
+                    raise Exception('''Could not set firefox install path. 
+                    Please make sure Firefox is in your Applications folder''')
+                firefox_install_path = join("/","Applications","Firefox.app")
+            else:
+                raise Exception("Unrecognised operating system.")           
+        print ("Firefox install path is: ",firefox_install_path)
+        if not os.path.exists(firefox_install_path): 
+            raise Exception ("Could not find Firefox installation")
     
     thread = shared.ThreadWithRetval(target= http_server)
     thread.daemon = True
@@ -1106,17 +1110,18 @@ if __name__ == "__main__":
             break
         if b_was_started == False:
             raise Exception ('minihttpd failed to start in 10 secs. Please investigate')        
-          
-    ff_retval = start_firefox(FF_to_backend_port, firefox_install_path, AES_decryption_port)
-    if ff_retval[0] != 'success': 
-        raise Exception (
-        'Error while starting Firefox: '+ ff_retval[0])
-    ff_proc = ff_retval[1]
-    firefox_pid = ff_proc.pid    
-    
-   
-        
-        
+              
+    if mode == 'addon':
+        with open (join(data_dir, 'ports'), 'w') as f:
+            f.write(str(FF_to_backend_port)+' '+str(AES_decryption_port))
+    elif mode == 'normal':
+        ff_retval = start_firefox(FF_to_backend_port, firefox_install_path, AES_decryption_port)
+        if ff_retval[0] != 'success': 
+            raise Exception (
+            'Error while starting Firefox: '+ ff_retval[0])
+        ff_proc = ff_retval[1]
+        firefox_pid = ff_proc.pid 
+       
     signal.signal(signal.SIGTERM, quit_clean)
 
     if testing: start_testing()
@@ -1124,5 +1129,6 @@ if __name__ == "__main__":
     try:
         while True:
             time.sleep(1)
-            if ff_proc.poll() != None: quit_clean() #FF was closed
+            if mode == 'normal':
+                if ff_proc.poll() != None: quit_clean() #FF was closed
     except KeyboardInterrupt: quit_clean()            
