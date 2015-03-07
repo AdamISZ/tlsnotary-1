@@ -433,6 +433,7 @@ def new_keypair():
     with open(os.path.join(datadir, 'recentkeys' , 'myprivkey'), 'w') as f: f.write(my_privkey_pem)
     with open(os.path.join(datadir, 'recentkeys', 'mypubkey'), 'w') as f: f.write(my_pubkey_pem)
     my_pubkey_export = base64.b64encode(shared.bi2ba(my_pub_key.n))
+    with open(os.path.join(datadir, 'recentkeys', 'mypubkey_export'), 'w') as f: f.write(my_pubkey_export)
     return my_pubkey_export
 
 #Thread to wait for arrival of auditee in peer messaging channel

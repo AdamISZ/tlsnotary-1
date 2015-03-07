@@ -100,6 +100,7 @@ def newkeys():
     with open(join(data_dir, 'recentkeys', 'myprivkey'), 'wb') as f: f.write(my_pem_privkey)
     with open(join(data_dir, 'recentkeys', 'mypubkey'), 'wb') as f: f.write(my_pem_pubkey)
     pubkey_export = b64encode(shared.bi2ba(my_pub_key.n))
+    with open(join(data_dir, 'recentkeys', 'mypubkey_export'), 'wb') as f: f.write(pubkey_export)
     return pubkey_export
 
 
