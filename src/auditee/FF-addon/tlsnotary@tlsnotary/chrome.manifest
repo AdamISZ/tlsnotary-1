@@ -1,2 +1,1 @@
-content     tlsnotary    chrome/content/
-skin	tlsnotary	classic/1.0	chrome/skin/
+content     tlsnotary    content/
