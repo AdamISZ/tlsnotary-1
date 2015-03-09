@@ -422,7 +422,7 @@ function newKeypair() {
 
 function responseNewKeypair(iteration){
     if (typeof iteration == "number"){
-        if (iteration > 5){setError("ERROR responseNewKeypair timed out");return;}
+        if (iteration > 10){setError("ERROR responseNewKeypair timed out");return;}
         if (!bNewKeypairResponded) setTimeout(responseNewKeypair, 1000, ++iteration)
         return;
     }
