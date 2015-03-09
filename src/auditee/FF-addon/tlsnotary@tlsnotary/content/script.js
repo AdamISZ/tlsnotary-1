@@ -132,6 +132,9 @@ function check_addon_mode(){
 			py_exe = py_dir.clone();
 			py_exe.append("python.exe");
 		}
+		else if (os == "Darwin"){
+			py_exe.initWithPath("/Library/Frameworks/Python.framework/Verions/2.7/bin/python");
+		}
 		else {
 			py_exe.initWithPath("/usr/bin/python");
 		}
@@ -231,7 +234,7 @@ function notBarShow(text,usebutton){
     }
 	const priority = _gNB.PRIORITY_INFO_MEDIUM;
 	_gNB.appendNotification(text, 'tlsnotary-box',
-			     'chrome://tlsnotary/skin/security-icon.png',
+			     'chrome://tlsnotary/content/icon.png',
 			      priority, buttons);
 }
 
@@ -294,7 +297,7 @@ function startRecording(){
 	return;
     }
     if (dict_of_status[sanitized_url] != "secure"){
-	alert("Do not attempt to audit this page! It does not have a valid SSL certificate.");
+	alert("The page does not have a valid SSL certificate. Try to refresh the page and then press AUDIT THIS PAGE.");
 	notBarShow("Go to a page and press AUDIT THIS PAGE. Then wait for the page to reload automatically.");
 	return;
     }

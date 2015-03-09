@@ -5,7 +5,7 @@
 
   <Description about="urn:mozilla:install-manifest">
     <em:id>tlsnotary@tlsnotary</em:id>
-    <em:version>!</em:version>
+    <em:version>1.0</em:version>
     <em:type>2</em:type>
     <em:bootstrap>true</em:bootstrap>
     <em:unpack>true</em:unpack>
@@ -21,9 +21,9 @@
     </em:targetApplication>
    
     <!-- Front End MetaData -->
-    <em:name>Enable this plugin to use tlsnotary</em:name>
-    <em:description>tlsnotary</em:description>
-    <em:creator>tlsnotary</em:creator>
+    <em:name>TLSNotary</em:name>
+    <em:description>TLSNotary - prove an HTTPS page was in your browser</em:description>
+    <em:creator>TLSNotary Group</em:creator>
     <em:homepageURL>https://tlsnotary.org</em:homepageURL>
   </Description>      
 </RDF>
