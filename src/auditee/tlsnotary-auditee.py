@@ -605,12 +605,18 @@ def stop_recording():
         zipf.write(join(commit_dir, onefile), onefile)
     zipf.close()
     path = join(trace_dir, 'mytrace.zip')
-    ul_sites = [shared.sendspace_getlink, shared.pipebytes_getlink, 
-                shared.qfs_getlink, shared.loadto_getlink]
+    ul_sites = [shared.sendspace_getlink, shared.qfs_getlink]
     #try a random upload site until we either succeed or deplete the list of sites
+    was_loadto_used = False
     while True:
         if not len(ul_sites):
-            raise Exception ('Could not use any of the available upload websites.')
+            #load.to seems to be blocking certain IPs so we use it as a last resort 
+            #when all other sites fail
+            if not was_loadto_used:
+                ul_sites.append(shared.loadto_getlink)
+                was_loadto_used = True
+            else:
+                raise Exception ('Could not use any of the available upload websites.')
         idx = random.randint(0, len(ul_sites)-1)
         try:
             print ('Uploading trace using ' +  str(ul_sites[idx]))
