@@ -1,5 +1,16 @@
-Follow:
-https://developer.mozilla.org/en-US/docs/Building_an_Extension
+If you have downloaded TLSNotary from github, here is how you can create a standalone addon for Firefox:
 
-Jump to section TEST to see where to put these files.
 
+1. Create a new dir tlsnotary@tlsnotary.
+
+2. Copy the contents of /src/auditee/FF-addon/tlsnotary@tlsnotary into tlsnotary@tlsnotary.
+
+3. Copy /src dir into tlsnotary@tlsnotary.
+
+3.1 If the addon will be used on Windows. Use the minimal set of files already prepared from https://github.com/themighty1/python-minimal. Put Python27 into tlsnotary@tlsnotary
+
+3.2 If the addon will NOT be used on Windows (Linux/OSX-only), simply create an empty Python27 dir inside tlsnotary@tlsnotary 
+
+4. Zip up the CONTENTS of tlsnotary@tlsnotary dir (NOT the dir itself )and change .zip extension to .xpi
+
+5. Open the xpi file inside Firefox.
