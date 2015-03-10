@@ -88,8 +88,8 @@ function init(){
 var dsprops;
 var ProfilePath;
 var profile_dir;
-var src_dir;
 var py_dir;
+var src_dir;
 var portsfile;
 var filesdir;
 var process;
@@ -104,27 +104,20 @@ function check_addon_mode(){
 	profile_dir = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsILocalFile);
 	profile_dir.initWithPath(ProfilePath);
 	//**** append each step in the path ****
-	src_dir = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsILocalFile);
 	py_dir = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsILocalFile);
 	portsfile = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsILocalFile);
+	src_dir = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsILocalFile);
 	src_dir.initWithPath(ProfilePath);
 	src_dir.append("extensions");
 	src_dir.append("tlsnotary@tlsnotary");
 	src_dir.append("src");
 
-	py_dir.initWithPath(ProfilePath);
-	py_dir.append("extensions");
-	py_dir.append("tlsnotary@tlsnotary");
-	py_dir.append("Python27");
-
 	if (src_dir.exists()){
 		filesdir = profile_dir.clone();
 		filesdir.append("tlsnotary_files");
-		if (! filesdir.exists()){
-			filesdir.create(filesdir.DIRECTORY_TYPE, 0775);
-			src_dir.copyTo(filesdir, null);
-			py_dir.copyTo(filesdir, null);
-		}
+		py_dir = filesdir.clone();
+		py_dir.append("Python27");
+		
 		var os = Cc["@mozilla.org/xre/app-info;1"].getService(Ci.nsIXULRuntime).OS; 
 		process = Cc['@mozilla.org/process/util;1'].getService(Ci.nsIProcess);
 		py_exe = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsILocalFile);

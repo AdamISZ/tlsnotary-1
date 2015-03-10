@@ -216,14 +216,18 @@ function advancedUpdate(){
     reqAdvancedUpdate.send();
 }
 
+var first_load = true;
 function homepageLoaded () {
+	if (first_load){
+		selftestMode();
+		first_load = false;
+	}
 	//wait for python backend to start
 	port = Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment).get("FF_to_backend_port");
 	if (port == ""){
 		setTimeout(homepageLoaded, 1000);
 		return;
 	}
-    selftestMode();
     reqGetAdvanced = new XMLHttpRequest();
     reqGetAdvanced.onload = responseGetAdvanced;
     reqGetAdvanced.open("HEAD","http://127.0.0.1:"+port+"/get_advanced",true);
