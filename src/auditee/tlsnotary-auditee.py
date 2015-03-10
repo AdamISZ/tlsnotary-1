@@ -777,7 +777,8 @@ def peer_handshake():
     #hello contains the first 10 bytes of modulus of the auditor's pubkey
     #this is how the auditor knows that we are addressing him.
     modulus = shared.bi2ba(auditor_pub_key.n)[:10]
-    signed_hello = rsa.sign('ae_hello'+my_nick, my_prv_key, 'SHA-1')
+    #pad to 1024bit = 128 bytes
+    signed_hello = rsa.sign('ae_hello'+my_nick, my_prv_key, 'SHA-1').rjust(128, '\x00')
     rs_choice = random.choice(shared.reliable_sites.keys())
     print ("Chosen site: ",rs_choice)
     rs_n = shared.reliable_sites[rs_choice][1].decode('hex')
@@ -787,8 +788,7 @@ def peer_handshake():
     for attempt in range(6): #try for 6*5 secs to find the auditor
         if b_is_auditor_registered == True: break #previous iteration successfully regd the auditor
         time_attempt_began = int(time.time())
-        shared.tlsn_send_single_msg(' :ae_hello:',modulus+signed_hello,auditor_pub_key)
-        shared.tlsn_send_single_msg(' :rs_pubkey:',rs_n+rs_e+rs_choice,auditor_pub_key)
+        shared.tlsn_send_single_msg(' :ae_hello:',modulus+signed_hello+rs_choice,auditor_pub_key)
         signed_hello_message_dict = {}
         full_signed_hello = ''
         while not b_is_auditor_registered:

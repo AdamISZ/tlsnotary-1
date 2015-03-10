@@ -446,69 +446,40 @@ def register_auditee_thread():
     with open(os.path.join(current_sessiondir, 'mypubkey'), 'r') as f: my_pubkey_pem =f.read()
     my_pub_key = rsa.PublicKey.load_pkcs1(my_pubkey_pem)
     my_modulus = shared.bi2ba(my_pub_key.n)[:10]
-    b_is_auditee_registered = False
-    hello_message_dict = {}
-    rs_pubkey_message_dict = {}
     full_hello = ''
-    full_rs_pubkey   = ''
-    while not (b_is_auditee_registered or b_terminate_all_threads):
+    while not b_terminate_all_threads:
         #NB we must allow decryption errors for this message, since another
         #handshake might be going on at the same time.
-        x = shared.tlsn_receive_single_msg((':rs_pubkey:',':ae_hello:'),my_private_key,ide=True)
-        if not x: continue
-        msg_array,nick = x
-        header, seq, msg, ending = msg_array
-        if 'rs_pubkey' in header and auditee_nick != '': #we already got the first ae_hello part
-            rs_pubkey_message_dict[seq] = msg
-            if 'EOL' in ending:
-                rs_message_len = seq + 1
-                if range(rs_message_len) == rs_pubkey_message_dict.keys():
-                    try:
-                        for i in range(rs_message_len):
-                            full_rs_pubkey += rs_pubkey_message_dict[i]
-                        rs_modulus_byte = full_rs_pubkey[:256]
-                        rs_exponent_byte = full_rs_pubkey[256:260]
-                        domain_bytes = full_rs_pubkey[260:]
-                        #look up the domain in the locally stored reliable sites,
-                        #and as a sanity check compare his pubkey with ours
-                        assert rs_modulus_byte == shared.reliable_sites[domain_bytes][1].decode('hex'),\
-                        "Auditee provided pubkey for : "+domain_bytes+ " did not match ours; investigate."
-                        assert 65537 == shared.ba2int(rs_exponent_byte) , "Public key exponent is not the standard 65537"
-                        rs_choice = domain_bytes
-                        print ('Auditee successfully verified')
-                        b_is_auditee_registered = True
-                        break
-                    except:
-                        print ('Error while processing rs pubkey')
-                        auditee_nick=''#erase the nick so that the auditee could try registering again
-                        continue
-
-        if not 'ae_hello' in header: continue
-
-        hello_message_dict[seq] = msg
-        if 'EOL' in ending:
-            hello_message_len = seq +1
-            if range(hello_message_len) == hello_message_dict.keys():
-                try:
-                    for i in range(hello_message_len):
-                        full_hello += hello_message_dict[i]
-
-                    modulus = full_hello[:10] #this is the first 10 bytes of modulus of auditor's pubkey
-                    sig = str(full_hello[10:]) #this is a sig for 'ae_hello||auditee nick'. The auditor is expected to have received auditee's pubkey via other channels
-                    if modulus != my_modulus : continue
-                    rsa.verify('ae_hello'+nick, sig, auditee_public_key)
-                    #we get here if there was no exception
-                    auditee_nick = nick
-                except:
-                    print ('Verification of a hello message failed')
-                    continue
-
-    if not b_is_auditee_registered:
-        return ('failure',)
+        try:
+            x = shared.tlsn_receive_single_msg(':ae_hello:',my_private_key,ide=True)
+            if not x: continue
+            msg_array,nick = x
+            header, seq, msg, ending = msg_array
+            if not 'ae_hello' in header: continue
+            full_hello += msg            
+            if ending == 'CRLF':
+                continue
+            modulus = full_hello[:10] #this is the first 10 bytes of modulus of auditor's pubkey
+            sig = str(full_hello[10:138]) #this is a sig for 'ae_hello||auditee nick'. The auditor is expected to have received auditee's pubkey via other channels
+            rs_choice = full_hello[138:]
+            if not (rs_choice in shared.reliable_sites):
+                raise Exception('Unknown reliable site', rs_choice)
+            if modulus != my_modulus:
+                raise Exception ('Not my modulus', modulus)
+            rsa.verify('ae_hello'+nick, sig, auditee_public_key)
+            print ('Auditee successfully verified')
+            auditee_nick = nick
+            break
+        except Exception,e:
+            print ('Verification of a hello message failed', e)
+            auditee_nick=''#erase the nick so that the auditee could try registering again
+            full_hello = ''
+            continue
+    #we get here if auditee was successfully verified
     signed_hello = rsa.sign('ao_hello'+my_nick, my_private_key, 'SHA-1')
     #send twice because it was observed that the msg would not appear on the chan
     for x in range(2):
-        shared.tlsn_send_single_msg('ao_hello',signed_hello,auditee_public_key,ctrprty_nick = auditee_nick)
+        shared.tlsn_send_single_msg(':ao_hello',signed_hello,auditee_public_key,ctrprty_nick = auditee_nick)
         time.sleep(2)
 
     progress_queue.put(time.strftime('%H:%M:%S', time.localtime()) + \
