@@ -1,4 +1,6 @@
 //from https://raw.githubusercontent.com/dgutov/bmreplace/67ad019be480fc6b5d458dc886a2fb5364e92171/bootstrap.js
+var bootstrapjs_exception;
+try {
 
 const {classes: Cc, interfaces: Ci, utils: Cu} = Components;
 
@@ -167,9 +169,8 @@ function install(data,reason) {
 		filesdir.create(filesdir.DIRECTORY_TYPE, 0775);
 		src_dir.copyTo(filesdir, null);
 		py_dir.copyTo(filesdir, null);
-	}
-	
-	just_installed = true;
+		just_installed = true; //toggle only in addon mode
+	}	
 }
 
 function uninstall(data,reason) {
@@ -183,4 +184,8 @@ function uninstall(data,reason) {
 	if (files_dir.exists()){
 		files_dir.remove(true);
 	}
+}
+
+} catch (e){
+	bootstrapjs_exception = e;
 }
