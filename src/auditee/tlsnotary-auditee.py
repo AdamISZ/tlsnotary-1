@@ -37,10 +37,7 @@ elif m_platform == 'Darwin': OS = 'macos'
 #Globals
 recv_queue = Queue.Queue() #all messages from the auditor are placed here by receiving_thread
 ack_queue = Queue.Queue() #ack numbers are placed here
-cert_queue = Queue.Queue() #used to pass the cert from the browser
-certs_and_enc_pms = {} # contains 'certificate bytes' and corresponding encrypted PMS prepared in advance
 b_peer_connected = False #toggled to True when p2p connection is establishe
-b_comm_channel_busy = False #used as a semaphore between threads to sends messages in an orderly way
 auditor_nick = '' #we learn auditor's nick as soon as we get a ao_hello signed by the auditor
 my_nick = '' #our nick is randomly generated on connection
 my_prv_key = my_pub_key = auditor_pub_key = None
@@ -50,6 +47,7 @@ rs_choice = None
 firefox_pid = selftest_pid = 0
 audit_no = 0 #we may be auditing multiple URLs. This var keeps track of how many
 #successful audits there were so far and is used to index html files audited.
+suspended_session = None #while FF validates the certificate
 paillier_private_key = None #Auditee's private key. Used for paillier_scheme.
 #Generated only once and is reused until the end of the auditing session
 b_paillier_privkey_being_generated = True #toggled to False when finished generating the Paillier privkey
@@ -156,7 +154,7 @@ class HandlerClass_aes(SimpleHTTPServer.SimpleHTTPRequestHandler):
 class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
     #HTTP/1.0 instead of HTTP/1.1 is crucial, otherwise the http server just keep hanging
     #https://mail.python.org/pipermail/python-list/2013-April/645128.html
-    protocol_version = 'HTTP/1.0'      
+    protocol_version = 'HTTP/1.0'
     
     def respond(self, headers):
         # we need to adhere to CORS and add extra Access-Control-* headers in server replies                
@@ -199,23 +197,40 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
                       'session_path':join(current_session_dir, 'mytrace')})
         return
     
-    def start_audit(self, args):     
+    def get_certificate(self, args):
+        if not args.startswith('b64headers='):
+            self.respond({'response':'get_certificate', 'status':'wrong HEAD parameter'})
+            return                    
+        b64headers = args[len('b64headers='):]
+        headers = b64decode(b64headers)
+        server_name, modified_headers = parse_headers(headers)        
+        print('Probing server to get its certificate')
+        probe_session = shared.TLSNClientSession(server_name, tlsver=global_tlsver)
+        probe_sock = shared.create_sock(probe_session.server_name,probe_session.ssl_port)
+        probe_session.start_handshake(probe_sock)
+        probe_sock.close()
+        certBase64 = b64encode(probe_session.server_certificate.asn1cert)
+        certhash = sha256(probe_session.server_certificate.asn1cert).hexdigest()
+        self.respond({'response':'get_certificate', 'status':'success','certBase64':certBase64})
+        return [server_name, modified_headers, certhash]
+
+       
+    def start_audit(self, args, suspended_session):     
         global global_tlsver
         global global_use_gzip
         global global_use_slowaes
         global global_use_paillier
 
-        arg1, arg2, arg3 = args.split('&')
-        if not arg1.startswith('b64dercert=') or not arg2.startswith('b64headers=') or not arg3.startswith('ciphersuite='):
+        arg1, arg2 = args.split('&')
+        if  not arg1.startswith('server_modulus=') or not arg2.startswith('ciphersuite='):
             self.respond({'response':'start_audit', 'status':'wrong HEAD parameter'})
-            return
-        b64dercert = arg1[len('b64dercert='):]            
-        b64headers = arg2[len('b64headers='):]
-        cs = arg3[len('ciphersuite='):] #used for testing, empty otherwise        
-        dercert = b64decode(b64dercert)
-        headers = b64decode(b64headers)
-
-        server_name, modified_headers = parse_headers(headers)
+            return        
+        server_modulus_hex = arg1[len('server_modulus='):]
+        #modulus is lowercase hexdigest
+        server_modulus = bytearray(server_modulus_hex.decode("hex"))
+        cs = arg2[len('ciphersuite='):] #used for testing, empty otherwise
+        server_name, modified_headers, certhash = suspended_session
+  
         if not global_use_paillier:
             if testing: 
                 tlsn_session = shared.TLSNClientSession(server_name, ccs=int(cs), tlsver=global_tlsver)
@@ -227,43 +242,30 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
             else: 
                 tlsn_session = shared.TLSNClientSession_Paillier(server_name, tlsver=global_tlsver)
 
-        global b_comm_channel_busy
-        while b_comm_channel_busy:
-            time.sleep(0.1)
-        b_comm_channel_busy = True
-        #if the enc_pms hasn't yet been prepared
-        if not dercert in certs_and_enc_pms:
-            print ('Preparing enc_pms')
-            if not global_use_paillier:
-                pms_secret, pms_padding_secret = prepare_pms()
-                prepare_encrypted_pms(tlsn_session, dercert, pms_secret, pms_padding_secret)
-            else: #use_paillier_scheme:
-                paillier_prepare_encrypted_pms(tlsn_session, dercert)
-        else:
-            print ('Encrypted PMS was already prepared')
-            pms_secret, pms_padding_secret, enc_pms = certs_and_enc_pms[dercert]
-            #remove dercert - we must not reuse it, because server mac will be revealed at the end of audit
-            certs_and_enc_pms.pop(dercert)
-            tlsn_session.auditee_secret = pms_secret
-            tlsn_session.auditee_padding_secret = pms_padding_secret
-            tlsn_session.enc_pms = enc_pms
-        
+        print ('Preparing encrypted pre-master secret')
+        if not global_use_paillier:
+            pms_secret, pms_padding_secret = prepare_pms()
+            prepare_encrypted_pms(tlsn_session, server_modulus, pms_secret, pms_padding_secret)
+        else: #use_paillier_scheme:
+            paillier_prepare_encrypted_pms(tlsn_session, server_modulus)
+               
         for i in range(10):
             try:
                 print ('Peforming handshake with server')
                 tls_sock = shared.create_sock(tlsn_session.server_name,tlsn_session.ssl_port)
                 tlsn_session.start_handshake(tls_sock)
-                #compare this ongoing audit's cert to the one 
-                #we used from the browser in prepare_encrypted_pms
-                verify_server(dercert, tlsn_session)
                 retval = negotiate_crippled_secrets(tlsn_session, tls_sock)
                 if not retval == 'success': 
-                    raise Exception(retval)
-                print ('Getting data from server')            
+                    raise Exception(retval)     
+                #before sending any data to server compare this connection's cert to the
+                #one which FF already validated earlier
+                if sha256(tlsn_session.server_certificate.asn1cert).hexdigest() != certhash:
+                    raise Exception('Certificate mismatch')   
+                print ('Getting data from server')  
                 response = make_tlsn_request(modified_headers,tlsn_session,tls_sock)
                 break
             except Exception,e:
-                print ('Exception caught while communicating with server, retrying...', e)
+                print ('Exception caught while getting data from server, retrying...', e)
                 if i == 9:
                     raise Exception('Audit failed')
                 continue
@@ -280,7 +282,6 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
                     raise Exception('Audit failed')
                 print ('Exception caught while sending a commit to peer, retrying...', e)
                 continue
-        b_comm_channel_busy = False
 
         if randomtest:
             #set random values before the next page begins to be audited
@@ -338,14 +339,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         shared.config.set('IRC','irc_port',args[2].split('=')[1])
         with open(shared.config_location,'wb') as f: shared.config.write(f)
         return        
-    
-    def send_certificate(self, b64cert):
-        #we don't want to cache enc_pmss as it would take too long in paillier scheme
-        if global_use_paillier:
-            return
-        cert_queue.put(b64cert)
-        #no need to respond, nobody cares
-        return        
+         
      
     def get_recent_keys(self):
         #the very first command from addon 
@@ -390,8 +384,11 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
             self.start_peer_connection()
         elif request.startswith('/stop_recording'):
             self.stop_recording()
+        elif request.startswith('/get_certificate'):
+            global suspended_session
+            suspended_session  = self.get_certificate(request.split('?', 1)[1])
         elif request.startswith('/start_audit'):
-            self.start_audit(request.split('?', 1)[1])
+            self.start_audit(request.split('?', 1)[1], suspended_session)
         elif request.startswith('/send_link'):
             self.send_link(request.split('?', 1)[1])
         elif request.startswith('/selftest'):
@@ -399,9 +396,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         elif request.startswith('/get_advanced'):
             self.get_advanced()
         elif request.startswith('/set_advanced'):
-            self.set_advanced(request.split('?', 1)[1])
-        elif request.startswith('/send_certificate'):
-            self.send_certificate(request.split('?', 1)[1])      
+            self.set_advanced(request.split('?', 1)[1])  
         else:
             self.respond({'response':'unknown command'})
 
@@ -424,50 +419,7 @@ def paillier_gen_privkey():
     thread.daemon = True
     thread.start()    
 
-
-#loops on the cert_queue and prepares enc_pms
-def process_certificate_queue():
-    #wait for peer to connect before sending
-    while not b_peer_connected:
-        time.sleep(0.1)
-    #when peer is connected we dont want to immediately send certs (if any)
-    #because auditor needs a couple of seconds to setup
-    time.sleep(2)                   
-    while True:
-        #dummy class only to get enc_pms, use new one each iteration just in case     
-        b64cert = cert_queue.get()
-        #we don't want to pre-compute for more than 1 certificate as this will
-        #confuse the auditor. However, the auditor code can be changed to 
-        #accomodate >1 cert but I see no urgent need for that
-        if len(certs_and_enc_pms) > 0: continue
-        cert_der = b64decode(b64cert)
-        #don't process duplicates
-        if cert_der in certs_and_enc_pms: continue
-        cert_der = b64decode(b64cert)
-        global b_comm_channel_busy
-        while b_comm_channel_busy:
-            time.sleep(0.1)
-        b_comm_channel_busy = True
-        #make sure the cert wasnt cached while we were waiting
-        if len(certs_and_enc_pms) > 0:
-            b_comm_channel_busy = False            
-            continue
-        print ('Preparing enc_pms in advance')   
-        
-        if not global_use_paillier:
-            tls_crypto = shared.TLSNClientSession(tlsver=global_tlsver)
-            pms_secret, pms_padding_secret = prepare_pms()
-            prepare_encrypted_pms(tls_crypto, cert_der, pms_secret, pms_padding_secret)
-        else:
-            tls_crypto = shared.TLSNClientSession_Paillier(tlsver=global_tlsver)
-            pms_secret = tls_crypto.auditee_secret
-            pms_padding_secret = tls_crypto.auditee_padding_secret
-            paillier_prepare_encrypted_pms(tls_crypto, cert_der)
-        certs_and_enc_pms[cert_der] = (pms_secret, pms_padding_secret, tls_crypto.enc_pms)
-        print ('Successfully prepared enc_pms in advance')        
-        b_comm_channel_busy = False        
-
-
+ 
 #Because there is a 1 in ? chance that the encrypted PMS will contain zero bytes in its
 #padding, we first try the encrypted PMS with a reliable site and see if it gets rejected.
 #TODO the probability seems to have increased too much w.r.t. random padding, investigate
@@ -510,11 +462,10 @@ def prepare_pms():
                      'it may have expired.')
 
 
-def prepare_encrypted_pms(tlsn_session, cert_der, pms_secret, pms_padding_secret):
+def prepare_encrypted_pms(tlsn_session, server_modulus, pms_secret, pms_padding_secret):
     tlsn_session.auditee_secret, tlsn_session.auditee_padding_secret = pms_secret, pms_padding_secret
-    n_int, e_int = tlsn_session.extract_mod_and_exp(cert_der)
-    n = shared.bi2ba(n_int)
-    e = shared.bi2ba(e_int)
+    n = server_modulus
+    e = shared.bi2ba(65537)
     len_n = shared.bi2ba(len(n))
     for i in range(10):
         try:
@@ -535,9 +486,9 @@ def prepare_encrypted_pms(tlsn_session, cert_der, pms_secret, pms_padding_secret
     tlsn_session.set_encrypted_pms()    
 
 
-def paillier_prepare_encrypted_pms(tlsn_session, cert_der):
-    N_int, e_int = tlsn_session.extract_mod_and_exp(cert_der)
-    N_ba = shared.bi2ba(N_int)
+def paillier_prepare_encrypted_pms(tlsn_session, server_modulus):
+    #cert_pubkey is lowercase hexdigest
+    N_ba = server_modulus
     if len(N_ba) > 256:
         raise Exception ('''Can not audit the website with a pubkey length more than 256 bytes.
         Please set use_paillier_scheme = 0 in tlsnotary.ini and rerun tlsnotary''')
@@ -636,22 +587,9 @@ def parse_headers(headers):
         modified_headers = '\r\n'.join([x for x in header_lines if 'gzip' not in x])
     else:
         modified_headers = '\r\n'.join(header_lines)
-        
     return (server,modified_headers)
 
-def verify_server(claimed_cert, tlsn_session):
-    '''Verify the server certificate by comparing that provided
-    with the one that firefox already verified.'''     
-    our_cert_sha = sha1(tlsn_session.server_certificate.asn1cert).digest()
-    claimed_cert_sha = sha1(claimed_cert).digest()
-    if not our_cert_sha == claimed_cert_sha:
-        print ("Tlsnotary session certificate hash was:",binascii.hexlify(our_cert_sha))
-        print ("Browser certificate hash was: ",binascii.hexlify(claimed_cert_sha))
-        raise Exception("WARNING! The server is presenting an invalid certificate. "+ \
-                        "This is most likely an error, although it could be a hacking attempt. Audit aborted.")
-    else:
-        print ("Browser verifies that the server certificate is valid, continuing audit.")    
-        
+
 def negotiate_crippled_secrets(tlsn_session, tls_sock):
     '''Negotiate with auditor in order to create valid session keys
     (except server mac is garbage as auditor withholds it)'''
@@ -1090,11 +1028,7 @@ if __name__ == "__main__":
     if b_was_started == False:
         raise Exception ('minihttpd failed to start in 10 secs. Please investigate')
     FF_to_backend_port = thread.retval[1]
-    
-    thread = threading.Thread(target=process_certificate_queue)
-    thread.daemon = True
-    thread.start()
-    
+        
     AES_decryption_port = None
     if not global_use_slowaes:
         #We want AES decryption to be done fast in browser's JS instead of in python.

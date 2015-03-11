@@ -1,33 +1,25 @@
 var script_exception;
 try {	
 
-var Cc = Components.classes;
-var Ci = Components.interfaces;
-var Cu = Components.utils;
+const {classes: Cc, interfaces: Ci, utils: Cu} = Components;
 var envvar = Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment);
-var prefs = Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService).getBranch("");
 
-var bStartRecordingResponded = false;
 var bStopRecordingResponded = false;
+var bStopGetCertificate = false;
 var bStopStartAudit = false;
-var bIsRecordingSoftwareStarted = false; //we start the software only once
-var reqStartRecording;
 var reqStopRecording;
+var reqGetCertificate;
 var reqStartAudit;
 var tab_url_full = "";//full URL at the time when AUDIT* is pressed
 var tab_url = ""; //the URL at the time when AUDIT* is pressed (only the domain part up to the first /)
 var session_path = "";
 var audited_browser; //the FF's internal browser which contains the audited HTML
 var testingMode = false;
-var headers="";
-var dict_of_certs = {};
 var dict_of_status = {};
 var dict_of_httpchannels = {};
 
 var port = envvar.get("FF_to_backend_port");
 var decr_port = envvar.get("TLSNOTARY_AES_DECRYPTION_PORT");
-//setting homepage should be done from here rather than defaults.js in order to have the desired effect. FF's quirk.
-prefs.setCharPref("browser.startup.homepage", "chrome://tlsnotary/content/auditee.html");
 Cu.import("resource://gre/modules/PopupNotifications.jsm");
 Cu.import('resource://gre/modules/Services.jsm');
 
@@ -73,7 +65,6 @@ function init(){
 	alert = win.alert;
 	
 	check_addon_mode();
-	setPrefs();
 	//start waiting
 	setTimeout(startListening,500);
 	pollEnvvar();
@@ -264,7 +255,7 @@ function pollEnvvar(){
 
 function startListening(){
 //from now on, we will check the security status of all loaded tabs
-//and store the security status and certificate fingerprint in a lookup table
+//and store the security status in a lookup table
 //indexed by the url. Doing this immediately allows the user to start
 //loading tabs before the peer negotiation is finished.
     gBrowser.addProgressListener(myListener);
@@ -301,7 +292,7 @@ function startRecording(){
     tab_url = x.join('/');
 	
     var httpChannel = dict_of_httpchannels[sanitized_url]
-	headers = "";
+	let headers = "";
 	headers += httpChannel.requestMethod + " /" + tab_url + " HTTP/1.1" + "\r\n";
 	httpChannel.visitRequestHeaders(function(header,value){
                                   headers += header +": " + value + "\r\n";});
@@ -320,36 +311,115 @@ function startRecording(){
 		//FF's uploaddata contains Content-Type and Content-Length headers + '\r\n\r\n' + http body
 		headers += uploaddata;
 	}
-    startAudit(sanitized_url);
+	var b64headers = btoa(headers);
+	reqGetCertificate = Cc["@mozilla.org/xmlextras/xmlhttprequest;1"].createInstance();
+	reqGetCertificate.onload = responseGetCertificate;
+	reqGetCertificate.open("HEAD", "http://127.0.0.1:"+port+"/get_certificate?b64headers="+b64headers, true);
+	reqGetCertificate.timeout = 0; //no timeout
+	reqGetCertificate.send();
+	responseGetCertificate(0);	
 }
 
 
-function buildBase64DER(chars){
-    var result = "";
-    for (i=0; i < chars.length; i++)
-        result += String.fromCharCode(chars[i]);
-    return btoa(result);
+function responseGetCertificate(iteration){
+	if (typeof iteration == "number"){
+	if (iteration > 10){
+	notBarShow("ERROR: responseGetCertificate timed out",false);
+		return;
+	}
+	if (!bStopGetCertificate) setTimeout(responseGetCertificate, 1000, ++iteration)
+	return;
+    }
+    //else: not a timeout but a response from the server
+	bStopGetCertificate = true;
+    var query = reqGetCertificate.getResponseHeader("response");
+    var status = reqGetCertificate.getResponseHeader("status");
+    var certBase64 = reqGetCertificate.getResponseHeader("certBase64");
+   	if (query != "get_certificate"){
+		notBarShow("ERROR Internal error. Wrong response header: " +query,false);
+        return;
+    }
+    if (status != "success"){
+        if (testingMode == true) {
+	    notBarShow("ERROR Received an error message: " + status);
+            return; //failure to find HTML is considered a fatal error during testing
+        }
+        notBarShow("ERROR Received an error message: " + status + ". Page decryption FAILED. Try pressing AUDIT THIS PAGE again",true);     
+        return;
+    }
+    if (! verifyCert(certBase64)){
+		alert("This website cannot be audited by TLSNotary because it presented an untrusted certificate");
+		return;
+	}
+	else {
+		let server_modulus = getModulus(certBase64);
+		startAudit(server_modulus);
+	}
 }
 
 
-function startAudit(urldata){
+//extracts modulus from PEM certificate
+function getModulus(certBase64){
+	const nsASN1Tree = "@mozilla.org/security/nsASN1Tree;1"
+	const nsIASN1Tree = Ci.nsIASN1Tree;
+	const nsIX509CertDB = Ci.nsIX509CertDB;
+	const nsX509CertDB = "@mozilla.org/security/x509certdb;1";
+	let certdb = Cc[nsX509CertDB].getService(nsIX509CertDB);
+	let cert = certdb.constructX509FromBase64(certBase64);
+	let hexmodulus = "";
+	
+	let certDumpTree = Cc[nsASN1Tree].createInstance(nsIASN1Tree);
+	certDumpTree.loadASN1Structure(cert.ASN1Structure);
+	let modulus_str = certDumpTree.getDisplayData(12);
+	if (! modulus_str.startsWith( "Modulus (" ) ){
+		//most likely an ECC certificate
+		alert ("Unfortunately this website is not compatible with TLSNotary. (could not parse RSA certificate)");
+		return;
+	}
+	let lines = modulus_str.split('\n');
+	let line = "";
+	for (var i = 1; i<lines.length; ++i){
+		line = lines[i];
+		//an empty line is where the pubkey part ends
+		if (line == "") {break;}
+		//remove all whitespaces (g is a global flag)
+		hexmodulus += line.replace(/\s/g, '');
+	}
+	return hexmodulus;
+}
+
+
+function startAudit(server_modulus){
     notBarShow("Audit is underway, please be patient.",false);
     reqStartAudit = Cc["@mozilla.org/xmlextras/xmlhttprequest;1"].createInstance();
     reqStartAudit.onload = responseStartAudit;
-    var cert = dict_of_certs[urldata];
-    var len = new Object();
-    var rawDER = cert.getRawDER(len);
-    var b64DERCert = buildBase64DER(rawDER);    
-    var b64headers = btoa(headers); //headers is a global variable
+    
     var ciphersuite = ''
     if (testingMode == true){
 		ciphersuite = current_ciphersuite; //<-- global var from testdriver_script.js
 	}
-    reqStartAudit.open("HEAD", "http://127.0.0.1:"+port+"/start_audit?b64dercert="+b64DERCert+
-		"&b64headers="+b64headers+"&ciphersuite="+ciphersuite, true);
+    reqStartAudit.open("HEAD", "http://127.0.0.1:"+port+"/start_audit?server_modulus="+server_modulus+"&ciphersuite="+ciphersuite, true);
 	reqStartAudit.timeout = 0; //no timeout
     reqStartAudit.send();
     responseStartAudit(0);	
+}
+
+
+function verifyCert(certBase64){
+	const nsIX509CertDB = Ci.nsIX509CertDB;
+	const nsX509CertDB = "@mozilla.org/security/x509certdb;1";
+	const nsIX509Cert = Ci.nsIX509Cert;
+	let certdb = Cc[nsX509CertDB].getService(nsIX509CertDB);
+	let cert = certdb.constructX509FromBase64(certBase64);
+	let a = {}, b = {};
+	let retval = certdb.verifyCertNow(cert, nsIX509Cert.CERT_USAGE_SSLServer, nsIX509CertDB.FLAG_LOCAL_ONLY, a, b);
+	if (retval == 0){
+		//success
+		return true;
+	}
+	else {
+		return false;
+	}
 }
 
 
@@ -366,6 +436,7 @@ function responseStartAudit(iteration){
 	bStopStartAudit = true;
     var query = reqStartAudit.getResponseHeader("response");
     var status = reqStartAudit.getResponseHeader("status");
+    var certBase64 = reqStartAudit.getResponseHeader("certBase64");
    	if (query != "start_audit"){
 		notBarShow("ERROR Internal error. Wrong response header: " +query,false);
         return;
@@ -375,26 +446,20 @@ function responseStartAudit(iteration){
 	    notBarShow("ERROR Received an error message: " + status);
             return; //failure to find HTML is considered a fatal error during testing
         }
-        notBarShow("ERROR Received an error message: " + status + ". Page decryption FAILED. Try pressing AUDIT THIS PAGE again",true);
-        
+        notBarShow("ERROR Received an error message: " + status + ". Page decryption FAILED. Try pressing AUDIT THIS PAGE again",true);     
         return;
-    }
-
+    }   
     //else successful response
     b64_html_paths = reqStartAudit.getResponseHeader("html_paths");
     html_paths_string = atob(b64_html_paths);
-
     html_paths = html_paths_string.split("&").filter(function(e){return e});
-
     //in new tlsnotary, perhaps there cannot be more than one html,
     //but kept in a loop just in case
     go_offline_for_a_moment(); //prevents loading images from cache
     for (var i=0; i<html_paths.length; i++){
         var browser = gBrowser.getBrowserForTab(gBrowser.addTab(html_paths[i]));
     }
-
     notBarShow("Page decryption successful. Press FINISH or go to another page and press AUDIT THIS PAGE");
-    
 }
 
 
@@ -471,29 +536,10 @@ function dumpSecurityInfo(channel,urldata) {
 	sanitized_url = urldata.split("#")[0];
 	dict_of_status[sanitized_url] = latest_tab_sec_state;
 	dict_of_httpchannels[sanitized_url]  = channel.QueryInterface(Ci.nsIHttpChannel);
-	
     }
     else {
         console.log("\tNo security info available for this channel\n");
     }
-    // Print SSL certificate details
-    if (secInfo instanceof Ci.nsISSLStatusProvider) {
-      var cert = secInfo.QueryInterface(Ci.nsISSLStatusProvider).SSLStatus.QueryInterface(Ci.nsISSLStatus).serverCert;
-      dict_of_certs[sanitized_url] = cert;
-      //send the cert immediately to backend to prepare encrypted PMS
-	  send_cert_to_backend(cert);
-    }
-}
-
-
-function send_cert_to_backend(cert){
-    var len = new Object();
-    var rawDER = cert.getRawDER(len);
-    var b64DERCert = buildBase64DER(rawDER);    
-	var reqSendCertificate = Cc["@mozilla.org/xmlextras/xmlhttprequest;1"].createInstance();
-    reqSendCertificate.open("HEAD", "http://127.0.0.1:"+port+"/send_certificate?"+b64DERCert, true);
-    reqSendCertificate.send();
-    //we don't care about the response
 }
 
 
@@ -576,61 +622,6 @@ function aes_decrypt(b64ciphertext, b64key, b64IV){
 	return b64decrypted;
 }
 
-
-function setPrefs(){
-//We only need RSA ciphers AES128/256/RC4MD5/RC4SHA 
-prefs.setBoolPref("security.ssl3.dhe_dss_aes_128_sha", false);
-prefs.setBoolPref("security.ssl3.dhe_dss_aes_256_sha",false);
-prefs.setBoolPref("security.ssl3.dhe_dss_camellia_128_sha",false);
-prefs.setBoolPref("security.ssl3.dhe_dss_camellia_256_sha",false);
-prefs.setBoolPref("security.ssl3.dhe_dss_des_ede3_sha",false);
-prefs.setBoolPref("security.ssl3.dhe_rsa_aes_128_sha",false);
-prefs.setBoolPref("security.ssl3.dhe_rsa_aes_256_sha",false);
-prefs.setBoolPref("security.ssl3.dhe_rsa_camellia_128_sha",false);
-prefs.setBoolPref("security.ssl3.dhe_rsa_camellia_256_sha",false);
-prefs.setBoolPref("security.ssl3.dhe_rsa_des_ede3_sha",false);
-prefs.setBoolPref("security.ssl3.ecdh_ecdsa_aes_128_sha",false);
-prefs.setBoolPref("security.ssl3.ecdh_ecdsa_aes_256_sha",false);
-prefs.setBoolPref("security.ssl3.ecdh_ecdsa_des_ede3_sha",false);
-prefs.setBoolPref("security.ssl3.ecdh_ecdsa_rc4_128_sha",false);
-prefs.setBoolPref("security.ssl3.ecdh_rsa_aes_128_sha",false);
-prefs.setBoolPref("security.ssl3.ecdh_rsa_aes_256_sha",false);
-prefs.setBoolPref("security.ssl3.ecdh_rsa_des_ede3_sha",false);
-prefs.setBoolPref("security.ssl3.ecdh_rsa_rc4_128_sha",false);
-prefs.setBoolPref("security.ssl3.ecdhe_ecdsa_aes_128_gcm_sha256",false);
-prefs.setBoolPref("security.ssl3.ecdhe_ecdsa_aes_128_sha",false);
-prefs.setBoolPref("security.ssl3.ecdhe_ecdsa_aes_256_sha",false);
-prefs.setBoolPref("security.ssl3.ecdhe_ecdsa_des_ede3_sha",false);
-prefs.setBoolPref("security.ssl3.ecdhe_ecdsa_rc4_128_sha",false);
-prefs.setBoolPref("security.ssl3.ecdhe_rsa_aes_128_gcm_sha256",false);
-prefs.setBoolPref("security.ssl3.ecdhe_rsa_aes_128_sha",false);
-prefs.setBoolPref("security.ssl3.ecdhe_rsa_aes_256_sha",false);
-prefs.setBoolPref("security.ssl3.ecdhe_rsa_des_ede3_sha",false);
-prefs.setBoolPref("security.ssl3.ecdhe_rsa_rc4_128_sha",false);
-prefs.setBoolPref("security.ssl3.rsa_aes_128_sha",true);
-prefs.setBoolPref("security.ssl3.rsa_aes_256_sha",true);
-prefs.setBoolPref("security.ssl3.rsa_camellia_128_sha",false);
-prefs.setBoolPref("security.ssl3.rsa_camellia_256_sha",false);
-prefs.setBoolPref("security.ssl3.rsa_des_ede3_sha",false);
-prefs.setBoolPref("security.ssl3.rsa_fips_des_ede3_sha",false);
-prefs.setBoolPref("security.ssl3.rsa_rc4_128_md5",true);
-prefs.setBoolPref("security.ssl3.rsa_rc4_128_sha",true);
-prefs.setBoolPref("security.ssl3.rsa_seed_sha",false);
-prefs.setIntPref("security.tls.version.max",1); // use only TLS 1.0
-
-prefs.setBoolPref("security.enable_tls_session_tickets",false);
-
-//tshark can't dissect spdy. websockets may cause unexpected issues
-prefs.setBoolPref("network.http.spdy.enabled",false);
-prefs.setBoolPref("network.http.spdy.enabled.v2",false);
-prefs.setBoolPref("network.http.spdy.enabled.v3",false);
-prefs.setBoolPref("network.websocket.enabled",false);
-//no cache should be used
-prefs.setBoolPref("browser.cache.disk.enable", false);
-prefs.setBoolPref("browser.cache.memory.enable", false);
-prefs.setBoolPref("browser.cache.disk_cache_ssl", false);
-prefs.setBoolPref("network.http.use-cache", false);
-}
 
 //This must be at the bottom, otherwise we'd have to define each function
 //before it gets used.
