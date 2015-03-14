@@ -116,8 +116,9 @@ class HandlerClass_aes(SimpleHTTPServer.SimpleHTTPRequestHandler):
         if self.path.startswith('/ready_to_decrypt'):
             self.send_response(200)
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Expose-Headers", "response, ciphertext, key, iv")
+            self.send_header("Access-Control-Expose-Headers", "status, response, ciphertext, key, iv")
             self.send_header("response", "ready_to_decrypt")
+            self.send_header("status", "success")
             #wait for sth to appear in the queue
             ciphertext, key, iv = aes_ciphertext_queue.get()
             self.send_header("ciphertext", b64encode(ciphertext))
@@ -128,15 +129,16 @@ class HandlerClass_aes(SimpleHTTPServer.SimpleHTTPRequestHandler):
             self.end_headers()
             return
         
-        if self.path.startswith('/cleartext='):
+        if self.path.startswith('/cleartext'):
             if not b_awaiting_cleartext:
                 print ('OUT OF ORDER:' + self.path)
                 raise Exception ('received a cleartext request out of order')
             self.send_response(200)
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Expose-Headers", "response")
+            self.send_header("Access-Control-Expose-Headers", "status, response")
             self.send_header("response", "cleartext")
-            cleartext = b64decode(self.path[len('/cleartext='):])
+            self.send_header("status", "success")
+            cleartext = b64decode(self.path[len('/cleartext?b64cleartext='):])
             aes_cleartext_queue.put(cleartext)
             b_awaiting_cleartext = False            
             self.end_headers()

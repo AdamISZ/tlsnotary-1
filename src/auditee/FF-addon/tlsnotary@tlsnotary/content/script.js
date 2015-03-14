@@ -2,26 +2,14 @@ var script_exception;
 try {	
 
 const {classes: Cc, interfaces: Ci, utils: Cu} = Components;
+Cu.import("resource://gre/modules/PopupNotifications.jsm");
+Cu.import('resource://gre/modules/Services.jsm');
 var envvar = Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment);
-
-var bStopRecordingResponded = false;
-var bStopGetCertificate = false;
-var bStopStartAudit = false;
-var reqStopRecording;
-var reqGetCertificate;
-var reqStartAudit;
-var tab_url_full = "";//full URL at the time when AUDIT* is pressed
-var tab_url = ""; //the URL at the time when AUDIT* is pressed (only the domain part up to the first /)
-var session_path = "";
-var audited_browser; //the FF's internal browser which contains the audited HTML
+var port = envvar.get("FF_to_backend_port");
+var decr_port = envvar.get("TLSNOTARY_AES_DECRYPTION_PORT");
 var testingMode = false;
 var dict_of_status = {};
 var dict_of_httpchannels = {};
-
-var port = envvar.get("FF_to_backend_port");
-var decr_port = envvar.get("TLSNOTARY_AES_DECRYPTION_PORT");
-Cu.import("resource://gre/modules/PopupNotifications.jsm");
-Cu.import('resource://gre/modules/Services.jsm');
 
 var win;
 var gBrowser ;
@@ -263,8 +251,8 @@ function startListening(){
 
 
 function startRecording(){
-    audited_browser = gBrowser.selectedBrowser;
-    tab_url_full = audited_browser.contentWindow.location.href;
+    var audited_browser = gBrowser.selectedBrowser;
+    var tab_url_full = audited_browser.contentWindow.location.href;
     
     //remove hashes - they are not URLs but are used for internal page mark-up
     sanitized_url = tab_url_full.split("#")[0];
@@ -289,7 +277,7 @@ function startRecording(){
     //passed tests, secure, grab headers, update status bar and start audit:
     var x = sanitized_url.split('/');
     x.splice(0,3);
-    tab_url = x.join('/');
+    var tab_url = x.join('/');
 	
     var httpChannel = dict_of_httpchannels[sanitized_url]
 	let headers = "";
@@ -312,42 +300,68 @@ function startRecording(){
 		headers += uploaddata;
 	}
 	var b64headers = btoa(headers);
-	reqGetCertificate = Cc["@mozilla.org/xmlextras/xmlhttprequest;1"].createInstance();
-	reqGetCertificate.onload = responseGetCertificate;
-	reqGetCertificate.open("HEAD", "http://127.0.0.1:"+port+"/get_certificate?b64headers="+b64headers, true);
-	reqGetCertificate.timeout = 0; //no timeout
-	reqGetCertificate.send();
-	responseGetCertificate(0);	
+	send("get_certificate", ["b64headers", b64headers], ["certBase64"], 10, process_certificate)
 }
 
 
-function responseGetCertificate(iteration){
-	if (typeof iteration == "number"){
-	if (iteration > 10){
-	notBarShow("ERROR: responseGetCertificate timed out",false);
-		return;
+//send to backend a request with arguments and receive a response with expected headers
+// within a timeout period, then proceed to call the callback
+// e.g send("get_certificate", ["b64headers", b64headers], ["certBase64"], 10, process_certificate)
+function send(request, args, expected_response, timeout, callback, port_in){
+	if (typeof(port_in)==='undefined') port_in = port;
+	var req = Cc["@mozilla.org/xmlextras/xmlhttprequest;1"].createInstance();
+	var retval;
+	retval = {loaded: false, timedout: false}
+	req.onload = function(){
+		if (retval.timedout) return; //response received after timeout expired
+		retval.loaded = true;
+		var query = req.getResponseHeader("response");
+		var status = req.getResponseHeader("status");
+		if (query != request){
+			notBarShow("ERROR Internal error. Wrong response header: " +query,false);
+			return;
+		}
+		if (status != "success"){
+			notBarShow("ERROR Received an error message: " + status,true);     
+        return;
+		}
+		let responses = [];
+		let response;
+		for (var i=0; i<expected_response.length; ++i){
+			response = req.getResponseHeader(expected_response[i]);
+			if (typeof(response) != "string"){
+				notBarShow("ERROR Internal error. Missing expected response: " + expected_response[i],false);
+				return;
+			}
+			responses.push(response);
+		}
+		if (callback != null){callback(responses);}
 	}
-	if (!bStopGetCertificate) setTimeout(responseGetCertificate, 1000, ++iteration)
-	return;
-    }
-    //else: not a timeout but a response from the server
-	bStopGetCertificate = true;
-    var query = reqGetCertificate.getResponseHeader("response");
-    var status = reqGetCertificate.getResponseHeader("status");
-    var certBase64 = reqGetCertificate.getResponseHeader("certBase64");
-   	if (query != "get_certificate"){
-		notBarShow("ERROR Internal error. Wrong response header: " +query,false);
-        return;
-    }
-    if (status != "success"){
-        if (testingMode == true) {
-	    notBarShow("ERROR Received an error message: " + status);
-            return; //failure to find HTML is considered a fatal error during testing
-        }
-        notBarShow("ERROR Received an error message: " + status + ". Page decryption FAILED. Try pressing AUDIT THIS PAGE again",true);     
-        return;
-    }
-    if (! verifyCert(certBase64)){
+	let argstring = "";
+	for (let i=0; i<(args.length/2); i++){
+		//we need /request?arg=value&arg2=value2
+		if (i==0) argstring += "?";
+		if (i>0) argstring += "&";
+		argstring += args[i*2]+"=";
+		argstring += args[i*2+1];
+	}
+	req.open("HEAD", "http://127.0.0.1:"+port_in+"/"+request+argstring, true);
+	req.timeout = 0; //no timeout
+	req.send();
+	if (timeout != null){
+		setTimeout(function(){
+			if (retval.loaded) return; //already responded
+			retval.timedout = true;
+			notBarShow("ERROR: " + request + "timed out",false);
+			return;
+		},timeout*1000);
+	}
+}
+
+
+function process_certificate(args){
+	let certBase64 = args[0]
+	if (! verifyCert(certBase64)){
 		alert("This website cannot be audited by TLSNotary because it presented an untrusted certificate");
 		return;
 	}
@@ -390,18 +404,13 @@ function getModulus(certBase64){
 
 
 function startAudit(server_modulus){
-    notBarShow("Audit is underway, please be patient.",false);
-    reqStartAudit = Cc["@mozilla.org/xmlextras/xmlhttprequest;1"].createInstance();
-    reqStartAudit.onload = responseStartAudit;
-    
+    notBarShow("Audit is underway, please be patient.",false);    
     var ciphersuite = ''
     if (testingMode == true){
 		ciphersuite = current_ciphersuite; //<-- global var from testdriver_script.js
 	}
-    reqStartAudit.open("HEAD", "http://127.0.0.1:"+port+"/start_audit?server_modulus="+server_modulus+"&ciphersuite="+ciphersuite, true);
-	reqStartAudit.timeout = 0; //no timeout
-    reqStartAudit.send();
-    responseStartAudit(0);	
+	send("start_audit", ["server_modulus", server_modulus, "ciphersuite", ciphersuite],
+		["html_paths"], 200, process_audit_finished)	
 }
 
 
@@ -423,34 +432,9 @@ function verifyCert(certBase64){
 }
 
 
-function responseStartAudit(iteration){
-    if (typeof iteration == "number"){
-        if (iteration > 200){
-	    notBarShow("ERROR: responseStartAudit timed out",false);
-            return;
-        }
-        if (!bStopStartAudit) setTimeout(responseStartAudit, 1000, ++iteration)
-        return;
-    }
-    //else: not a timeout but a response from the server
-	bStopStartAudit = true;
-    var query = reqStartAudit.getResponseHeader("response");
-    var status = reqStartAudit.getResponseHeader("status");
-    var certBase64 = reqStartAudit.getResponseHeader("certBase64");
-   	if (query != "start_audit"){
-		notBarShow("ERROR Internal error. Wrong response header: " +query,false);
-        return;
-    }
-    if (status != "success"){
-        if (testingMode == true) {
-	    notBarShow("ERROR Received an error message: " + status);
-            return; //failure to find HTML is considered a fatal error during testing
-        }
-        notBarShow("ERROR Received an error message: " + status + ". Page decryption FAILED. Try pressing AUDIT THIS PAGE again",true);     
-        return;
-    }   
+function process_audit_finished(args){
     //else successful response
-    b64_html_paths = reqStartAudit.getResponseHeader("html_paths");
+    b64_html_paths = args[0];
     html_paths_string = atob(b64_html_paths);
     html_paths = html_paths_string.split("&").filter(function(e){return e});
     //in new tlsnotary, perhaps there cannot be more than one html,
@@ -472,41 +456,14 @@ function go_offline_for_a_moment(){
 
 
 function stopRecording(){
-    notBarShow("Preparing the data to be sent to the auditor",false);
-    reqStopRecording = Cc["@mozilla.org/xmlextras/xmlhttprequest;1"].createInstance();
-    reqStopRecording.onload = responseStopRecording;
-    reqStopRecording.open("HEAD", "http://127.0.0.1:"+port+"/stop_recording", true);
-    reqStopRecording.send();
-    responseStopRecording(0);
+	var timeout = 100;
+	if (testingMode) timeout = 2000;
+	send("stop_recording", [], ["session_path"], timeout, process_stop)
 }
 
 
-function responseStopRecording(iteration){
-    if (typeof iteration == "number"){
-		var timeout = 100;
-		if (testingMode) timeout = 2000;
-        if (iteration > timeout){
-	    notBarShow("ERROR responseStopRecording timed out ",false);
-            return;
-        }
-        if (!bStopRecordingResponded) setTimeout(responseStopRecording, 1000, ++iteration)
-        return;
-    }
-    //else: not a timeout but a response from the server
-	bStopRecordingResponded = true;
-    var query = reqStopRecording.getResponseHeader("response");
-    var status = reqStopRecording.getResponseHeader("status");
-    session_path = reqStopRecording.getResponseHeader("session_path");
-	
-    if (query != "stop_recording"){
-		notBarShow("ERROR Internal error. Wrong response header: "+query,false);
-        return;
-    }
-	if (status != "success"){
-		notBarShow("ERROR Received an error message: " + status,false);
-		return;
-	}
-
+function process_stop(args){
+    let session_path = args[0]; //Not in use - contains path to the session files
 	popupShow("Congratulations. The auditor has acknowledged successful receipt of your audit data. You may now close the browser");
 	notBarShow("Auditing session ended successfully",false);
 	return;
@@ -573,42 +530,17 @@ var	myListener =
 }
 
 
-var reqReadyToDecrypt;
-var bStopReadyToDecrypt = false;
 function startDecryptionProcess(){
-	reqReadyToDecrypt = Cc["@mozilla.org/xmlextras/xmlhttprequest;1"].createInstance();
-	reqReadyToDecrypt.onload = responseReadyToDecrypt;
-	reqReadyToDecrypt.open("HEAD", "http://127.0.0.1:"+decr_port+"/ready_to_decrypt", true);
-	reqReadyToDecrypt.send();
-	setTimeout(responseReadyToDecrypt, 0, 0);
+	send("ready_to_decrypt", [], ["ciphertext", "key", "iv"], 111111, process_decr, decr_port)
 }
 
-function responseReadyToDecrypt(iteration){
-    if (typeof iteration == "number" || iteration == undefined){
-		//we dont want to time out because this is an endless loop        
-        if (!bStopReadyToDecrypt) setTimeout(responseReadyToDecrypt, 1000, ++iteration)
-        return;
-    }
-    //else: not a timeout but a response from the server
-	bStopReadyToDecrypt = true;
-    var query = reqReadyToDecrypt.getResponseHeader("response");
-    var b64ciphertext = reqReadyToDecrypt.getResponseHeader("ciphertext");
-    var b64key = reqReadyToDecrypt.getResponseHeader("key");
-    var b64iv = reqReadyToDecrypt.getResponseHeader("iv");
-   	if (query != "ready_to_decrypt"){
-		alert(iteration);
-		notBarShow("ERROR Internal error. Wrong response header: " +query,false);
-        return;
-    }
-    var b64cleartext = aes_decrypt(b64ciphertext, b64key, b64iv);
-    bStopReadyToDecrypt = false;
-    var req = Cc["@mozilla.org/xmlextras/xmlhttprequest;1"].createInstance();
-    req.open("HEAD", "http://127.0.0.1:"+decr_port+"/cleartext="+b64cleartext, true);
-	req.send();
-	reqReadyToDecrypt.open("HEAD", "http://127.0.0.1:"+decr_port+"/ready_to_decrypt", true);
-	reqReadyToDecrypt.timeout = 0; //no timeout
-	reqReadyToDecrypt.send();
-	responseReadyToDecrypt(0);
+function process_decr(args){
+    var b64ciphertext = args[0];
+    var b64key = args[1];
+    var b64iv = args[2];    
+    var b64cleartext = aes_decrypt(b64ciphertext, b64key, b64iv);  
+    send("cleartext", ["b64cleartext", b64cleartext], [], null, null, decr_port); //no callback
+    send("ready_to_decrypt", [], ["ciphertext", "key", "iv"], 111111, process_decr, decr_port);
 }
 
 function aes_decrypt(b64ciphertext, b64key, b64IV){
