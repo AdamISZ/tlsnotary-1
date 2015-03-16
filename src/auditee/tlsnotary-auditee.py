@@ -60,9 +60,6 @@ global_use_paillier = False
 #TESTING only vars
 testing = False #toggled when we are running a test suite (developer only)
 randomtest = False #randomly toggle some options from ini file
-aes_ciphertext_queue = Queue.Queue() #testing only: receive one ciphertext 
-aes_cleartext_queue = Queue.Queue() #testing only: and put one cleartext
-b_awaiting_cleartext = False #testing only: used for sanity check on HandlerClass_aes
 test_driver_pid = 0 #testing only: testdriver's PID used to kill it at quit_clean()
 test_auditor_pid = 0 #testing only: auditor's PID used to kill it at quit_clean()
 
@@ -217,11 +214,12 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         return [server_name, modified_headers, certhash]
 
        
-    def start_audit(self, args, suspended_session):     
+    def start_audit(self, args):     
         global global_tlsver
         global global_use_gzip
         global global_use_slowaes
         global global_use_paillier
+        global suspended_session
 
         arg1, arg2 = args.split('&')
         if  not arg1.startswith('server_modulus=') or not arg2.startswith('ciphersuite='):
@@ -277,7 +275,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         sf = str(audit_no)
         for i in range (10):
             try:
-                rv = decrypt_html(commit_session(tlsn_session, response,sf), tlsn_session, sf)
+                sha1hmac = commit_session(tlsn_session, response,sf)
                 break
             except Exception, e:
                 if i == 9:
@@ -285,23 +283,58 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
                 print ('Exception caught while sending a commit to peer, retrying...', e)
                 continue
 
+        rv = decrypt_html(sha1hmac, tlsn_session, sf)
+        if rv[0] == 'decrypt':
+            ciphertexts = rv[1]
+            ciphertext, key, iv = ciphertexts[0]
+            b64blob = b64encode(iv)+';'+b64encode(key)+';'+b64encode(ciphertext)
+            suspended_session = [tlsn_session, ciphertexts, [], 0, sf]
+            self.respond({'response':'start_audit', 'status':'success', 
+                          'next_action':'decrypt', 'argument':b64blob})
+            return
+        #else no browser decryption necessary
+        html_paths = b64encode(rv[1])
+        self.respond({'response':'start_audit', 'status':'success', 'next_action':'audit_finished', 'argument':html_paths})        
         if randomtest:
-            #set random values before the next page begins to be audited
-            global_use_gzip = (True, False)[random.randint(0,1)]
-            global_use_slowaes = (True, False)[random.randint(0,1)]
-            #we dont want to use paillier too often because it takes 2 minutes for 1 audit
-            global_use_paillier = (True, False, False, False, False, False)[random.randint(0,5)]
-            global_tlsver = (bytearray('\x03\x01'), bytearray('\x03\x02'))[random.randint(0,1)]
-            if global_use_paillier:
-                #in normal mode, paillier key is generated as soon as we start p2p connection
-                #however, in randomtest it is cleaner to generate it on first use
-                if not paillier_private_key:
-                    paillier_gen_privkey()
-            print('use_gzip', global_use_gzip, 'use_slowaes', global_use_slowaes, 'tlsver', global_tlsver, 'use_paillier',  global_use_paillier)
+            randomize_settings()
+           
           
-        if rv[0] == 'success': html_paths = b64encode(rv[1])
-        self.respond({'response':'start_audit', 'status':rv[0],'html_paths':html_paths})
-        return           
+    def process_cleartext(self, args):
+        global suspended_session
+        tlsn_session, ciphertexts, plaintexts, index, sf = suspended_session
+        raw_cleartext = b64decode(args[len('b64cleartext='):])
+        #crypto-js removes pkcs7 padding. There is still an extra byte which we remove it manually
+        plaintexts.append(raw_cleartext[:-1])
+        if (index+1) < len(ciphertexts):
+            index = index + 1
+            ciphertext, key, iv = ciphertexts[index]
+            b64blob = b64encode(iv)+';'+b64encode(key)+';'+b64encode(ciphertext)
+            suspended_session = [tlsn_session, ciphertexts, plaintexts, index, sf]
+            self.respond({'response':'cleartext', 'next_action':'decrypt', 
+                          'argument':b64blob, 'status':'success'})
+            return
+        #else this was the last decrypted ciphertext
+        plaintext = tlsn_session.mac_check_plaintexts(plaintexts)
+        rv = decrypt_html_stage2(plaintext, tlsn_session, sf)
+        self.respond({'response':'cleartext', 'status':'success', 'next_action':'audit_finished', 'argument':b64encode(rv[1])})        
+        if randomtest:
+            randomize_settings()
+      
+        
+    def randomize_settings():
+        #set random values before the next page begins to be audited
+        global_use_gzip = (True, False)[random.randint(0,1)]
+        global_use_slowaes = (True, False)[random.randint(0,1)]
+        #we dont want to use paillier too often because it takes 2 minutes for 1 audit
+        global_use_paillier = (True, False, False, False, False, False)[random.randint(0,5)]
+        global_tlsver = (bytearray('\x03\x01'), bytearray('\x03\x02'))[random.randint(0,1)]
+        if global_use_paillier:
+            #in normal mode, paillier key is generated as soon as we start p2p connection
+            #however, in randomtest it is cleaner to generate it on first use
+            if not paillier_private_key:
+                paillier_gen_privkey()
+        print('use_gzip', global_use_gzip, 'use_slowaes', global_use_slowaes, 'tlsver', global_tlsver, 'use_paillier',  global_use_paillier)    
+
     
     def send_link(self, args):
         rv = send_link(args)
@@ -390,7 +423,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
             global suspended_session
             suspended_session  = self.get_certificate(request.split('?', 1)[1])
         elif request.startswith('/start_audit'):
-            self.start_audit(request.split('?', 1)[1], suspended_session)
+            self.start_audit(request.split('?', 1)[1])
         elif request.startswith('/send_link'):
             self.send_link(request.split('?', 1)[1])
         elif request.startswith('/selftest'):
@@ -398,7 +431,9 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         elif request.startswith('/get_advanced'):
             self.get_advanced()
         elif request.startswith('/set_advanced'):
-            self.set_advanced(request.split('?', 1)[1])  
+            self.set_advanced(request.split('?', 1)[1]) 
+        elif request.startswith('/cleartext'):
+            self.process_cleartext(request.split('?', 1)[1])   
         else:
             self.respond({'response':'unknown command'})
 
@@ -670,18 +705,15 @@ def decrypt_html(sha1hmac, tlsn_session,sf):
     if global_use_slowaes or not tlsn_session.chosen_cipher_suite in [47,53]:
         #either using slowAES or a RC4 ciphersuite
         plaintext,bad_mac = tlsn_session.process_server_app_data_records()
-        if bad_mac: print ("WARNING! Plaintext is not authenticated.")        
-    else: #AES ciphersuite and not using slowaes        
+        if bad_mac:
+            raise Exception("WARNING! Plaintext is not authenticated.")
+        return decrypt_html_stage2(plaintext, tlsn_session, sf)
+    else: #AES ciphersuite and not using slowaes
         ciphertexts = tlsn_session.get_ciphertexts()
-        raw_plaintexts = []
-        for one_ciphertext in ciphertexts:
-            aes_ciphertext_queue.put(one_ciphertext)
-            raw_plaintext = aes_cleartext_queue.get()
-            #crypto-js knows only how to remove pkcs7 padding but not cbc padding
-            #which is one byte longer than pkcs7. We remove it manually
-            raw_plaintexts.append(raw_plaintext[:-1])
-        plaintext = tlsn_session.mac_check_plaintexts(raw_plaintexts)
+        return ('decrypt', ciphertexts)
 
+
+def decrypt_html_stage2(plaintext, tlsn_session, sf):
     plaintext = shared.dechunk_http(plaintext)
     if global_use_gzip:    
         plaintext = shared.gunzip_http(plaintext)
@@ -765,7 +797,7 @@ def peer_handshake():
 
 #Make a local copy of firefox, find the binary, install the new profile
 #and start up firefox with that profile.
-def start_firefox(FF_to_backend_port, firefox_install_path, AES_decryption_port):
+def start_firefox(FF_to_backend_port, firefox_install_path):
     #find the binary *before* copying; acts as sanity check
     ffbinloc = {'linux':['firefox'],'mswin':['firefox.exe'],'macos':['Contents','MacOS','firefox']}
     assert os.path.isfile(join(*([firefox_install_path]+ffbinloc[OS]))),\
@@ -830,7 +862,6 @@ def start_firefox(FF_to_backend_port, firefox_install_path, AES_decryption_port)
     os.putenv('FF_first_window', 'true')   #prevents addon confusion when websites open multiple FF windows
     if not global_use_slowaes:
         os.putenv('TLSNOTARY_USING_BROWSER_AES_DECRYPTION', 'true')
-        os.putenv('TLSNOTARY_AES_DECRYPTION_PORT', str(AES_decryption_port))
 
     if testing:
         print ('****************************TESTING MODE********************************')
@@ -1030,35 +1061,12 @@ if __name__ == "__main__":
     if b_was_started == False:
         raise Exception ('minihttpd failed to start in 10 secs. Please investigate')
     FF_to_backend_port = thread.retval[1]
-        
-    AES_decryption_port = None
-    if not global_use_slowaes:
-        #We want AES decryption to be done fast in browser's JS instead of in python.
-        #We start a server which sends ciphertexts to browser                
-        thread_aes = shared.ThreadWithRetval(target=aes_decryption_thread)
-        thread_aes.daemon = True
-        thread_aes.start()            
-        #wait for minihttpd thread to indicate its status  
-        b_was_started = False
-        for i in range(10):
-            time.sleep(1)        
-            if thread_aes.retval == '': continue
-            #else
-            if thread_aes.retval[0] != 'success': 
-                raise Exception (
-                'Failed to start minihttpd server. Please investigate')
-            #else
-            b_was_started = True
-            AES_decryption_port = thread_aes.retval[1]
-            break
-        if b_was_started == False:
-            raise Exception ('minihttpd failed to start in 10 secs. Please investigate')        
-              
+                      
     if mode == 'addon':
         with open (join(data_dir, 'ports'), 'w') as f:
-            f.write(str(FF_to_backend_port)+' '+str(AES_decryption_port))
+            f.write(str(FF_to_backend_port))
     elif mode == 'normal':
-        ff_retval = start_firefox(FF_to_backend_port, firefox_install_path, AES_decryption_port)
+        ff_retval = start_firefox(FF_to_backend_port, firefox_install_path)
         if ff_retval[0] != 'success': 
             raise Exception (
             'Error while starting Firefox: '+ ff_retval[0])

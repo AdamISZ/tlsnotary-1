@@ -1,6 +1,7 @@
 var testdriver_exception;
 try {
 
+const {classes: Cc, interfaces: Ci, utils: Cu} = Components;
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 
 var auditeeBrowser;

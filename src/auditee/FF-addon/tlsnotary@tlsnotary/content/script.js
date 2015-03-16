@@ -6,7 +6,6 @@ Cu.import("resource://gre/modules/PopupNotifications.jsm");
 Cu.import('resource://gre/modules/Services.jsm');
 var envvar = Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment);
 var port = envvar.get("FF_to_backend_port");
-var decr_port = envvar.get("TLSNOTARY_AES_DECRYPTION_PORT");
 var testingMode = false;
 var dict_of_status = {};
 var dict_of_httpchannels = {};
@@ -145,10 +144,8 @@ function checkports(){
 		fstream.init(portsfile, -1, 0, 0);
 		sstream.init(fstream);
 		ports_str = sstream.read(4096);
-		port = ports_str.split(" ")[0];
 		//set the envvar for auditee.html to know the port
-		Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment).set("FF_to_backend_port", port);
-		decr_port = ports_str.split(" ")[1];
+		Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment).set("FF_to_backend_port", ports_str);
 	}
 	else {
 		//let timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
@@ -234,10 +231,7 @@ function pollEnvvar(){
 	else {
 	popupShow("The connection to the auditor has been established. You may now open a new tab and go to a webpage. Please follow the instructions on the status bar below.");
 	}
-	
 	notBarShow("Go to a page and press AUDIT THIS PAGE. Then wait for the page to reload automatically.",true);
-	if (decr_port != ""){
-		startDecryptionProcess();}
 }
 
 
@@ -307,8 +301,7 @@ function startRecording(){
 //send to backend a request with arguments and receive a response with expected headers
 // within a timeout period, then proceed to call the callback
 // e.g send("get_certificate", ["b64headers", b64headers], ["certBase64"], 10, process_certificate)
-function send(request, args, expected_response, timeout, callback, port_in){
-	if (typeof(port_in)==='undefined') port_in = port;
+function send(request, args, expected_response, timeout, callback){
 	var req = Cc["@mozilla.org/xmlextras/xmlhttprequest;1"].createInstance();
 	var retval;
 	retval = {loaded: false, timedout: false}
@@ -345,7 +338,7 @@ function send(request, args, expected_response, timeout, callback, port_in){
 		argstring += args[i*2]+"=";
 		argstring += args[i*2+1];
 	}
-	req.open("HEAD", "http://127.0.0.1:"+port_in+"/"+request+argstring, true);
+	req.open("HEAD", "http://127.0.0.1:"+port+"/"+request+argstring, true);
 	req.timeout = 0; //no timeout
 	req.send();
 	if (timeout != null){
@@ -410,7 +403,7 @@ function startAudit(server_modulus){
 		ciphersuite = current_ciphersuite; //<-- global var from testdriver_script.js
 	}
 	send("start_audit", ["server_modulus", server_modulus, "ciphersuite", ciphersuite],
-		["html_paths"], 200, process_audit_finished)	
+		["next_action", "argument"], 200, process_audit_finished)	
 }
 
 
@@ -433,17 +426,22 @@ function verifyCert(certBase64){
 
 
 function process_audit_finished(args){
-    //else successful response
-    b64_html_paths = args[0];
-    html_paths_string = atob(b64_html_paths);
-    html_paths = html_paths_string.split("&").filter(function(e){return e});
-    //in new tlsnotary, perhaps there cannot be more than one html,
-    //but kept in a loop just in case
-    go_offline_for_a_moment(); //prevents loading images from cache
-    for (var i=0; i<html_paths.length; i++){
-        var browser = gBrowser.getBrowserForTab(gBrowser.addTab(html_paths[i]));
-    }
-    notBarShow("Page decryption successful. Press FINISH or go to another page and press AUDIT THIS PAGE");
+	let next_action = args[0]
+	let arg = args[1]
+	if (next_action == "audit_finished"){
+		b64_html_path = arg;
+		let html_path = atob(b64_html_path);
+		go_offline_for_a_moment(); //prevents loading images from cache
+		gBrowser.getBrowserForTab(gBrowser.addTab(html_path));
+		notBarShow("Page decryption successful. Press FINISH or go to another page and press AUDIT THIS PAGE");
+	}
+	else if (next_action == "decrypt"){
+		var b64cleartext = aes_decrypt(arg);  
+		send("cleartext", ["b64cleartext", b64cleartext], ["next_action", "argument"], 10, process_audit_finished);
+	}
+	else {
+		notBarShow("ERROR Internal error. expected audit_finished or decrypt but got " + next_action);
+	}
 }
 
 
@@ -530,27 +528,16 @@ var	myListener =
 }
 
 
-function startDecryptionProcess(){
-	send("ready_to_decrypt", [], ["ciphertext", "key", "iv"], 111111, process_decr, decr_port)
-}
-
-function process_decr(args){
-    var b64ciphertext = args[0];
-    var b64key = args[1];
-    var b64iv = args[2];    
-    var b64cleartext = aes_decrypt(b64ciphertext, b64key, b64iv);  
-    send("cleartext", ["b64cleartext", b64cleartext], [], null, null, decr_port); //no callback
-    send("ready_to_decrypt", [], ["ciphertext", "key", "iv"], 111111, process_decr, decr_port);
-}
-
-function aes_decrypt(b64ciphertext, b64key, b64IV){
-	var cipherParams = CryptoJS.lib.CipherParams.create({
-	ciphertext: CryptoJS.enc.Base64.parse(b64ciphertext)
+function aes_decrypt(b64blob){
+	let items = b64blob.split(";");
+	let IV = CryptoJS.enc.Base64.parse(items[0]);
+	let key = CryptoJS.enc.Base64.parse(items[1]);
+	let ciphertext = CryptoJS.enc.Base64.parse(items[2]);
+	let cipherParams = CryptoJS.lib.CipherParams.create({
+	ciphertext: ciphertext
 	});
-	var key = CryptoJS.enc.Base64.parse(b64key)
-	var IV = CryptoJS.enc.Base64.parse(b64IV)
-	var decrypted = CryptoJS.AES.decrypt(cipherParams, key, { iv: IV })
-	var b64decrypted = decrypted.toString(CryptoJS.enc.Base64)
+	let decrypted = CryptoJS.AES.decrypt(cipherParams, key, { iv: IV })
+	let b64decrypted = decrypted.toString(CryptoJS.enc.Base64)
 	return b64decrypted;
 }
 
