@@ -258,8 +258,8 @@ def process_messages():
                 decr_session.IV_after_finished = IV
                 plaintext, bad_mac = decr_session.process_server_app_data_records(is_for_auditor=True)
                 if bad_mac:
-                    print ("AUDIT FAILURE - invalid mac")
                     link_response = 'false'
+                    raise Exception("AUDIT FAILURE - invalid mac")
                 plaintext = shared.dechunk_http(plaintext)
                 plaintext = shared.gunzip_http(plaintext)
                 path = os.path.join(decr_dir, 'html-'+seqno)
@@ -267,18 +267,37 @@ def process_messages():
                 #also create a file where the auditor can see the domain and pubkey
                 with open (os.path.join(auditeetrace_dir, 'domain'+seqno), 'rb') as f: domain_data = f.read()
                 with open (os.path.join(commit_dir, 'pubkey'+seqno), 'rb') as f: pubkey_data = f.read()
+                with open (os.path.join(auditeetrace_dir, 'certificate.der'+seqno), 'rb') as f: certDER = f.read()
+                certPEM = base64.b64encode(certDER)
                 write_data = domain_data + '\n\n'
                 write_data += """
-The auditee claims that the server above presented the public key below
-Open the server address in your browser and check that the public key matches
-This step is mandatory to ascertain that the auditee hasn\'t tampered with the audit data
-In Firefox, click the padlock to the left of the URL bar -> More Information -> View Certificate -> Details
- -> in Certificate Fields choose Subject\'s Public Key -> Modulus should be: """
+You must paste the code below into the Browser Console of Mozilla Firefox to finish the audit.
+1. Enable the Browser Console by pressing Ctrl+Shift+I or from menu Tools-Web Developer-Toggle Tools
+2. In the upper right corner of the appeared console click a cogwheel icon (Toolbox Options)
+3. Scroll down a little and check "Enable chrome and add-on debugging" in the right hand side column
+4. Bring up Browser Console by pressing Ctrl+Shift+J or from menu Tools-Web Developer-Browser Console
+5. Paste the code below where the blinking cursor is at the bottom of the Browser Console and press Enter
+----------------------COPY AND PASTE THE CODE BELOW THIS LINE INTO THE BROWSER CONSOLE---------------
+
+function verifyCert(certBase64){
+	const {classes: Cc, interfaces: Ci} = Components;
+	const nsIX509CertDB = Ci.nsIX509CertDB;
+	const nsX509CertDB = "@mozilla.org/security/x509certdb;1";
+	const nsIX509Cert = Ci.nsIX509Cert;
+	let certdb = Cc[nsX509CertDB].getService(nsIX509CertDB);
+	let cert = certdb.constructX509FromBase64(certBase64);
+	let a = {}, b = {};
+	let retval = certdb.verifyCertNow(cert, nsIX509Cert.CERT_USAGE_SSLServer, nsIX509CertDB.FLAG_LOCAL_ONLY, a, b);
+	if (retval == 0){alert(cert.commonName + ' was successfully verified')}
+	else {alert('FAILED TO VERIFY')}
+}
+let cert =""" + '"' + certPEM + '"' + "\n" + "verifyCert(cert)"
                 write_data += '\n\n'
                 #format pubkey in nice rows of 16 hex numbers just like Firefox does
-                for i in range(1+len(pubkey_data)/48):
-                    write_data += pubkey_data[i*48:(i+1)*48] + '\n' 
-                with open(os.path.join(decr_dir, 'domain'+seqno), 'wb') as f: f.write(write_data)
+                #we may need this later
+                #for i in range(1+len(pubkey_data)/48):
+                 #   write_data += pubkey_data[i*48:(i+1)*48] + '\n' 
+                with open(os.path.join(decr_dir, 'README'+seqno), 'wb') as f: f.write(write_data)
                
             send_message('response:'+link_response)            
             if link_response == 'success':
