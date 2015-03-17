@@ -263,6 +263,9 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
                     raise Exception('Certificate mismatch')   
                 print ('Getting data from server')  
                 response = make_tlsn_request(modified_headers,tlsn_session,tls_sock)
+                #prefix response with number of to-be-ignored records, 
+        	#note: more than 256 unexpected records will cause a failure of audit. Just as well!
+        	response = shared.bi2ba(tlsn_session.unexpected_server_app_data_count,fixed=1) + response
                 break
             except Exception,e:
                 print ('Exception caught while getting data from server, retrying...', e)
@@ -669,8 +672,9 @@ def make_tlsn_request(headers,tlsn_session,tls_sock):
     if not response: 
         raise Exception ("Received no response to request, cannot continue audit.")
     tlsn_session.store_server_app_data_records(response)
-    tls_sock.close()    
-    return response 
+    tls_sock.close()
+    #we return the full record set, not only the response to our request
+    return tlsn_session.unexpected_server_app_data_raw + response
 
 def commit_session(tlsn_session,response,sf):
     '''Commit the encrypted server response and other data to auditor'''

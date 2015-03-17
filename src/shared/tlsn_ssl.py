@@ -495,8 +495,14 @@ class TLSNClientSession(object):
         self.server_mod_length = None
 
         #array of ciphertexts from each SSL record
-        self.server_response_ciphertexts=[]
-
+        self.server_response_app_data=[]
+        
+        #unexpected app data is defined as that received after 
+        #server finished, but before client request. This will
+        #be decrypted, but not included in plaintext result.
+        self.unexpected_server_app_data_count = 0
+        self.unexpected_server_app_data_raw = ''
+        
         #the HMAC required to construct the verify data
         #for the server Finished record
         self.verify_hmac_for_server_finished = None
@@ -618,11 +624,14 @@ class TLSNClientSession(object):
         #client finished must be sent encrypted       
         tls_sender(sckt,self.handshake_messages[6],hs, conn=self.client_connection_state, tlsver=self.tlsver)
         records=[]
-        while len(records) < 2:
+        while len(records) < 2: #conceivably, might want an extra timeout for naughty servers!?
             rspns = recv_socket(sckt,True)
             x, remaining = tls_record_decoder(rspns)
             assert not remaining, "Server sent spurious non-TLS response"
             records.extend(x)
+        
+        #this strange-looking 'filtering' approach is based on observation
+        #in practice of CCS being repeated (and possible also Finished, although I don't remember)
         sccs = [x for x in records if x.content_type == chcis][0]
         self.server_ccs = tls_record_fragment_decoder(chcis,sccs.fragment)[0]
         sf = [x for x in records if x.content_type == hs][0]
@@ -632,7 +641,22 @@ class TLSNClientSession(object):
         assert self.server_finished.handshake_type == h_fin, "Server failed to send Finished" 
         #store the IV immediately after decrypting Finished; this will be needed
         #by auditor in order to replay the decryption
-        self.IV_after_finished = self.server_connection_state.IV
+        self.IV_after_finished = self.server_connection_state.IV 
+        
+        if len(records) > 2:
+            #we received extra records; are they app data? if not we have bigger problems..
+            for x in records:
+                if x.content_type in [chcis,hs]: continue
+                if x.content_type != appd:
+                    #this is too much; if it's an Alert or something, we give up.
+                    raise Exception("Received unexpected TLS record before client request.")
+                #store any app data records, in sequence, prior to processing all app data.
+                self.server_response_app_data.extend(tls_record_fragment_decoder(appd,x.fragment))
+                #We have to store the raw form of these unexpected app data records, since they will
+                #be needed by auditor.
+                self.unexpected_server_app_data_raw += x.serialized #the full record serialization (otw bytes)
+                self.unexpected_server_app_data_count += 1 #note: each appd record contains ONE appd message
+        
               
     def complete_handshake(self,sckt,rsapms2):
         '''Called from prepare_pms(). For auditee only,
@@ -885,7 +909,6 @@ class TLSNClientSession(object):
         #for maximum flexibility in decryption
         recs, remaining = tls_record_decoder(response)
         assert not remaining, "Server sent spurious non-TLS data"
-        self.server_response_app_data = []
         for rec in recs:
             self.server_response_app_data.extend(tls_record_fragment_decoder(rec.content_type,
                                                                              rec.fragment))    
@@ -937,10 +960,13 @@ class TLSNClientSession(object):
             else:
                 print ("Info: Got an unexpected record type in the server response: ", 
                        type(self.server_response_app_data[i]))
-                
+               
             validity, stripped_pt = dummy_connection_state.verify_mac(pt,rt)
             assert validity==True, "Fatal error - invalid mac, data not authenticated!"
-            if rt==appd:
+            
+            #plaintext is only included if it's appdata not alerts, and if it's 
+            #not part of the ignored set (the set that was delivered pre-client-request)            
+            if rt==appd and i > self.unexpected_server_app_data_count:
                 mac_stripped_plaintext += stripped_pt
             elif rt==alrt:
                 print ("Info: alert received, decrypted: ", binascii.hexlify(stripped_pt))
@@ -981,7 +1007,7 @@ class TLSNClientSession(object):
         assert len(self.server_response_app_data),\
         "Could not process the server response, no ciphertext found."
         plaintexts = ''
-        for ciphertext in self.server_response_app_data:
+        for i,ciphertext in enumerate(self.server_response_app_data):
             if type(ciphertext) is TLSAppData:
                 rt = appd
             elif type(ciphertext) is TLSAlert:
@@ -991,7 +1017,10 @@ class TLSNClientSession(object):
             validity, plaintext = self.server_connection_state.dtvm(ciphertext.serialized,rt)
             if not validity==True: 
                 bad_record_mac += 1
-            if rt== appd: plaintexts += plaintext
+            #plaintext is only included if it's appdata not alerts, and if it's 
+            #not part of the ignored set (the set that was delivered pre-client-request)
+            if rt== appd and i>self.unexpected_server_app_data_count: 
+                plaintexts += plaintext
     
         return (plaintexts, bad_record_mac)    
 

@@ -246,8 +246,9 @@ def process_messages():
                 for fname in ['sha1hmac','cr','sr']:
                     with open(os.path.join(commit_dir, fname+seqno), 'rb') as f: 
                         decr_data[fname] = f.read()
-                tlsver = decr_data['response'][1:3]
+                tlsver = decr_data['response'][2:4]
                 decr_session = shared.TLSNClientSession(ccs = int(decr_data['cs']), tlsver=tlsver)
+                decr_session.unexpected_server_app_data_count = shared.ba2int(decr_data['response'][0])
                 #update TLS protocol dynamically based on response content
                 decr_session.client_random = decr_data['cr']
                 decr_session.server_random = decr_data['sr']
@@ -255,7 +256,7 @@ def process_messages():
                 decr_session.p_auditor = decr_data['sha1hmac']
                 decr_session.set_master_secret_half()
                 decr_session.do_key_expansion()
-                decr_session.store_server_app_data_records(decr_data['response'])
+                decr_session.store_server_app_data_records(decr_data['response'][1:])
                 #if RC4, we need to unpack the RC4 state from the IV data
                 IV = (map(ord,decr_data['IV'][:256]),ord(decr_data['IV'][256]),ord(decr_data['IV'][257])) \
                     if decr_session.chosen_cipher_suite in [4,5] else decr_data['IV']
