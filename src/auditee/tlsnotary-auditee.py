@@ -469,10 +469,10 @@ def prepare_pms():
                 raise Exception("Client session construction failed in prepare_pms")
             tls_sock = shared.create_sock(pms_session.server_name,pms_session.ssl_port)
             pms_session.start_handshake(tls_sock)
-            reply = send_and_recv('rcr_rsr:'+\
-                pms_session.client_random+pms_session.server_random)
+            reply = send_and_recv('rcr_rsr_rsname:'+\
+                pms_session.client_random+pms_session.server_random+rs_choice)
             if reply[0] != 'success': 
-                raise Exception ('Failed to receive a reply for rcr_rsr:')
+                raise Exception ('Failed to receive a reply for rcr_rsr_rsname:')
             if not reply[1].startswith('rrsapms_rhmac'):
                 raise Exception ('bad reply. Expected rrsapms_rhmac:')
             reply_data = reply[1][len('rrsapms_rhmac:'):]
@@ -761,7 +761,7 @@ def peer_handshake():
     for attempt in range(6): #try for 6*5 secs to find the auditor
         if b_is_auditor_registered == True: break #previous iteration successfully regd the auditor
         time_attempt_began = int(time.time())
-        shared.tlsn_send_single_msg(' :ae_hello:',modulus+signed_hello+rs_choice,auditor_pub_key)
+        shared.tlsn_send_single_msg(' :ae_hello:',modulus+signed_hello,auditor_pub_key)
         signed_hello_message_dict = {}
         full_signed_hello = ''
         while not b_is_auditor_registered:

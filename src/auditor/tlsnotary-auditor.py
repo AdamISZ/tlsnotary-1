@@ -55,12 +55,16 @@ def process_messages():
         #Receiving this data, the auditor generates his half of the 
         #premaster secret, and returns the hashed version, along with
         #the half-pms encrypted to the server's pubkey
-        if msg.startswith('rcr_rsr:'):                
-            msg_data = msg[len('rcr_rsr:'):]
+        if msg.startswith('rcr_rsr_rsname:'):                
+            msg_data = msg[len('rcr_rsr_rsname:'):]
             tlsn_session = shared.TLSNClientSession()
             rsp_session = shared.TLSNClientSession()
             rsp_session.client_random = msg_data[:32]
             rsp_session.server_random = msg_data[32:64]
+            global rs_choice
+            rs_choice = msg_data[64:]
+            if not (rs_choice in shared.reliable_sites):
+                raise Exception('Unknown reliable site', rs_choice)
             #pubkey required to set encrypted pms
             rsp_session.server_modulus = int(shared.reliable_sites[rs_choice][1],16)
             rsp_session.server_exponent = 65537
@@ -480,9 +484,6 @@ def register_auditee_thread():
                 continue
             modulus = full_hello[:10] #this is the first 10 bytes of modulus of auditor's pubkey
             sig = str(full_hello[10:138]) #this is a sig for 'ae_hello||auditee nick'. The auditor is expected to have received auditee's pubkey via other channels
-            rs_choice = full_hello[138:]
-            if not (rs_choice in shared.reliable_sites):
-                raise Exception('Unknown reliable site', rs_choice)
             if modulus != my_modulus:
                 raise Exception ('Not my modulus', modulus)
             rsa.verify('ae_hello'+nick, sig, auditee_public_key)
