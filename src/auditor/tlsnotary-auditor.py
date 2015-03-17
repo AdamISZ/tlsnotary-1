@@ -55,16 +55,18 @@ def process_messages():
         #Receiving this data, the auditor generates his half of the 
         #premaster secret, and returns the hashed version, along with
         #the half-pms encrypted to the server's pubkey
-        if msg.startswith('rcr_rsr_rsname:'):                
-            msg_data = msg[len('rcr_rsr_rsname:'):]
+        if msg.startswith('rcr_rsr_rsname_n:'):                
+            msg_data = msg[len('rcr_rsr_rsname_n:'):]
             tlsn_session = shared.TLSNClientSession()
             rsp_session = shared.TLSNClientSession()
             rsp_session.client_random = msg_data[:32]
             rsp_session.server_random = msg_data[32:64]
             global rs_choice
-            rs_choice = msg_data[64:]
-            if not (rs_choice in shared.reliable_sites):
-                raise Exception('Unknown reliable site', rs_choice)
+            rs_choice_first5 = msg_data[64:69]
+            rs_choice = [k for k in  shared.reliable_sites.keys() if k.startswith(rs_choice_first5)][0]
+            if not rs_choice:
+                raise Exception('Unknown reliable site', rs_choice_first5)
+            n = msg_data[69:]
             #pubkey required to set encrypted pms
             rsp_session.server_modulus = int(shared.reliable_sites[rs_choice][1],16)
             rsp_session.server_exponent = 65537
@@ -73,10 +75,15 @@ def process_messages():
             rsp_session.set_auditor_secret()
             rsp_session.set_enc_second_half_pms()           
             rrsapms = shared.bi2ba(rsp_session.enc_second_half_pms)
-            send_message('rrsapms_rhmac:'+ rrsapms+rsp_session.p_auditor)
+
             #we keep resetting so that the final, successful choice of secrets are stored
             tlsn_session.auditor_secret = rsp_session.auditor_secret
             tlsn_session.auditor_padding_secret = rsp_session.auditor_padding_secret
+            tlsn_session.server_mod_length = shared.bi2ba(len(n))
+            tlsn_session.server_modulus = shared.ba2int(n)
+            tlsn_session.set_enc_second_half_pms()
+            rsapms = shared.bi2ba(tlsn_session.enc_second_half_pms)            
+            send_message('rrsapms_rhmac_rsapms:'+ rrsapms+rsp_session.p_auditor+rsapms)            
             continue
         #---------------------------------------------------------------------#
         #cs_cr_sr_hmacms_verifymd5sha : sent by auditee at the start of the real audit.
@@ -110,25 +117,6 @@ def process_messages():
             hmacms_hmacek_hmacverify = tlsn_session.p_auditor[24:]+garbageized_hmac+hmac_verify_md5
             send_message('hmacms_hmacek_hmacverify:'+ hmacms_hmacek_hmacverify)
             continue
-        #---------------------------------------------------------------------#
-        #n_e: Server pubkey's modulus and exponent used to construct the
-        #second half of encrypted PMS
-        #This is done before the audit starts to cut down online time
-        elif msg.startswith('n_e:'): 
-            n_e = msg[len('n_e:'):]
-            n_len_int = int(n_e[:2].encode('hex'),16)
-            n = n_e[2:2+n_len_int]
-            e = n_e[2+n_len_int:2+n_len_int+3]
-            tlsn_session.server_modulus = int(n.encode('hex'),16)
-            tlsn_session.server_exponent = int(e.encode('hex'),16)
-            tlsn_session.server_mod_length = shared.bi2ba(n_len_int)
-            if not tlsn_session.auditor_secret: 
-                raise Exception("Auditor PMS secret data should have already been set.")
-            tlsn_session.set_enc_second_half_pms() #will set the enc PMS second half
-            rsapms =  shared.bi2ba(tlsn_session.enc_second_half_pms)
-            send_message('rsapms:'+ rsapms)
-            continue
-
         #---------------------------------------------------------------------#
         #Receive from the auditee the client handshake hashes (md5 and sha) and return
         #auditor's half of the HMAC needed to construct the PRF output for the verify data

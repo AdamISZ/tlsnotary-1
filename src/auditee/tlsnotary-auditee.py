@@ -43,7 +43,6 @@ my_nick = '' #our nick is randomly generated on connection
 my_prv_key = my_pub_key = auditor_pub_key = None
 rs_modulus = None
 rs_exponent = None
-rs_choice = None
 firefox_pid = selftest_pid = 0
 audit_no = 0 #we may be auditing multiple URLs. This var keeps track of how many
 #successful audits there were so far and is used to index html files audited.
@@ -104,7 +103,7 @@ class HandlerClass_aes(SimpleHTTPServer.SimpleHTTPRequestHandler):
     #Using HTTP/1.0 instead of HTTP/1.1 is crucial, otherwise the minihttpd just keep hanging
     #https://mail.python.org/pipermail/python-list/2013-April/645128.html
     protocol_version = "HTTP/1.0"      
-    
+
     def do_HEAD(self):
         print ('aes_http received ' + self.path[:80] + ' request',end='\r\n')
         # example HEAD string "/command?parameter=124value1&para2=123value2"
@@ -125,7 +124,7 @@ class HandlerClass_aes(SimpleHTTPServer.SimpleHTTPRequestHandler):
             b_awaiting_cleartext = True            
             self.end_headers()
             return
-        
+
         if self.path.startswith('/cleartext'):
             if not b_awaiting_cleartext:
                 print ('OUT OF ORDER:' + self.path)
@@ -140,13 +139,13 @@ class HandlerClass_aes(SimpleHTTPServer.SimpleHTTPRequestHandler):
             b_awaiting_cleartext = False            
             self.end_headers()
             return
-        
+
     #overriding BaseHTTPServer.py's method to cap the output
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - - [%s] %s\n" %
-                                  (self.client_address[0],
-                                   self.log_date_time_string(),
-                                   (fmt%args)[:80]))        
+                         (self.client_address[0],
+                          self.log_date_time_string(),
+                          (fmt%args)[:80]))        
 
 
 #Receive HTTP HEAD requests from FF addon
@@ -154,7 +153,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
     #HTTP/1.0 instead of HTTP/1.1 is crucial, otherwise the http server just keep hanging
     #https://mail.python.org/pipermail/python-list/2013-April/645128.html
     protocol_version = 'HTTP/1.0'
-    
+
     def respond(self, headers):
         # we need to adhere to CORS and add extra Access-Control-* headers in server replies                
         keys = [k for k in headers]
@@ -164,12 +163,12 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         for key in headers:
             self.send_header(key, headers[key])
         self.end_headers()        
-    
+
     def new_keypair(self):
         pubkey_export = newkeys()
         self.respond({'response':'new_keypair', 'pubkey':pubkey_export,
-                             'status':'success'})     
-        
+                      'status':'success'})     
+
     def import_auditor_pubkey(self, args):
         if not args.startswith('pubkey='):
             self.respond({'response':'import_auditor_pubkey', 'status':'wrong HEAD parameter'})
@@ -179,7 +178,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         status = import_auditor_pubkey(auditor_pubkey_b64modulus)           
         self.respond({'response':'import_auditor_pubkey', 'status':status})
         return
-    
+
     def start_peer_connection(self):
         if global_use_paillier:
             paillier_gen_privkey()
@@ -189,13 +188,13 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         b_peer_connected = True            
         self.respond({'response':'start_peer_connection', 'status':rv,'pms_status':rv2})
         return
-    
+
     def stop_recording(self):
         rv = stop_recording()
         self.respond({'response':'stop_recording', 'status':rv,
                       'session_path':join(current_session_dir, 'mytrace')})
         return
-    
+
     def get_certificate(self, args):
         if not args.startswith('b64headers='):
             self.respond({'response':'get_certificate', 'status':'wrong HEAD parameter'})
@@ -213,7 +212,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         self.respond({'response':'get_certificate', 'status':'success','certBase64':certBase64})
         return [server_name, modified_headers, certhash]
 
-       
+
     def start_audit(self, args):     
         global global_tlsver
         global global_use_gzip
@@ -230,7 +229,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         server_modulus = bytearray(server_modulus_hex.decode("hex"))
         cs = arg2[len('ciphersuite='):] #used for testing, empty otherwise
         server_name, modified_headers, certhash = suspended_session
-  
+
         if not global_use_paillier:
             if testing: 
                 tlsn_session = shared.TLSNClientSession(server_name, ccs=int(cs), tlsver=global_tlsver)
@@ -241,14 +240,16 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
                 tlsn_session = shared.TLSNClientSession_Paillier(server_name, ccs=int(cs), tlsver=global_tlsver)
             else: 
                 tlsn_session = shared.TLSNClientSession_Paillier(server_name, tlsver=global_tlsver)
-
+        tlsn_session.server_modulus = shared.ba2int(server_modulus)
+        tlsn_session.server_mod_length = shared.bi2ba(len(server_modulus))        
+        
         print ('Preparing encrypted pre-master secret')
         if not global_use_paillier:
-            pms_secret, pms_padding_secret = prepare_pms()
-            prepare_encrypted_pms(tlsn_session, server_modulus, pms_secret, pms_padding_secret)
+            #for RSA scheme we prepare encPMS inside prepare_pms()
+            prepare_pms(tlsn_session)
         else: #use_paillier_scheme:
-            paillier_prepare_encrypted_pms(tlsn_session, server_modulus)
-               
+            paillier_prepare_encrypted_pms(tlsn_session)
+
         for i in range(10):
             try:
                 print ('Peforming handshake with server')
@@ -264,15 +265,15 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
                 print ('Getting data from server')  
                 response = make_tlsn_request(modified_headers,tlsn_session,tls_sock)
                 #prefix response with number of to-be-ignored records, 
-        	#note: more than 256 unexpected records will cause a failure of audit. Just as well!
-        	response = shared.bi2ba(tlsn_session.unexpected_server_app_data_count,fixed=1) + response
+                #note: more than 256 unexpected records will cause a failure of audit. Just as well!
+                response = shared.bi2ba(tlsn_session.unexpected_server_app_data_count,fixed=1) + response
                 break
             except Exception,e:
                 print ('Exception caught while getting data from server, retrying...', e)
                 if i == 9:
                     raise Exception('Audit failed')
                 continue
-        
+
         global audit_no
         audit_no += 1 #we want to increase only after server responded with data
         sf = str(audit_no)
@@ -300,8 +301,8 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         self.respond({'response':'start_audit', 'status':'success', 'next_action':'audit_finished', 'argument':html_paths})        
         if randomtest:
             randomize_settings()
-           
-          
+
+
     def process_cleartext(self, args):
         global suspended_session
         tlsn_session, ciphertexts, plaintexts, index, sf = suspended_session
@@ -322,8 +323,8 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         self.respond({'response':'cleartext', 'status':'success', 'next_action':'audit_finished', 'argument':b64encode(rv[1])})        
         if randomtest:
             randomize_settings()
-      
-        
+
+
     def randomize_settings():
         #set random values before the next page begins to be audited
         global_use_gzip = (True, False)[random.randint(0,1)]
@@ -338,12 +339,12 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
                 paillier_gen_privkey()
         print('use_gzip', global_use_gzip, 'use_slowaes', global_use_slowaes, 'tlsver', global_tlsver, 'use_paillier',  global_use_paillier)    
 
-    
+
     def send_link(self, args):
         rv = send_link(args)
         self.respond({'response':'send_link', 'status':rv})
         return              
-          
+
     def selftest(self):
         auditor_py = join(install_dir, 'src', 'auditor', 'tlsnotary-auditor.py')
         output = check_output([sys.executable, auditor_py, 'daemon', 'genkey'])
@@ -357,28 +358,28 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         selftest_pid = proc.pid
         self.respond({'response':'selftest', 'status':'success'})
         return        
-    
+
     def get_advanced(self):
         self.respond({'irc_server':shared.config.get('IRC','irc_server'),
-        'channel_name':shared.config.get('IRC','channel_name'),'irc_port':shared.config.get('IRC','irc_port')})
+                      'channel_name':shared.config.get('IRC','channel_name'),'irc_port':shared.config.get('IRC','irc_port')})
         return        
-    
+
     def set_advanced(self, args):
         args = args.split(',')
         #TODO can make this more generic when there are lots of arguments;
         if not (args[0].split('=')[0] == 'server_val' and args[1].split('=')[0] == 'channel_val' \
-            and args[2].split('=')[0] == 'port_val' and args[0].split('=')[1] and \
-            args[1].split('=')[1] and args[2].split('=')[1]):
+                and args[2].split('=')[0] == 'port_val' and args[0].split('=')[1] and \
+                args[1].split('=')[1] and args[2].split('=')[1]):
             print ('Failed to reset the irc config. Server was:',args[0].split('=')[1], \
-            ' and channel was: ', args[1].split('=')[1])
+                   ' and channel was: ', args[1].split('=')[1])
             return
         shared.config.set('IRC','irc_server',args[0].split('=')[1])
         shared.config.set('IRC','channel_name',args[1].split('=')[1])
         shared.config.set('IRC','irc_port',args[2].split('=')[1])
         with open(shared.config_location,'wb') as f: shared.config.write(f)
         return        
-         
-     
+
+
     def get_recent_keys(self):
         #the very first command from addon 
         #on tlsnotary frst run, there will be no saved keys
@@ -403,11 +404,11 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
             if auditor_pubkey_pem == '': auditor_pubkey_export = ''
             else: auditor_pubkey_export = b64encode(shared.bi2ba(auditor_pub_key.n))
             self.respond({'response':'get_recent_keys', 'mypubkey':my_pubkey_export,
-                     'auditorpubkey':auditor_pubkey_export})
+                          'auditorpubkey':auditor_pubkey_export})
         else:
             self.respond({'response':'get_recent_keys', 'mypubkey':'', 'auditorpubkey':''})                
         return                        
-    
+
     def do_HEAD(self):
         request = self.path
         print ('browser sent ' + request[:80] + '... request',end='\r\n')
@@ -443,10 +444,10 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
     #overriding BaseHTTPRequestHandler's method to cap the output
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - - [%s] %s\n" %
-                                  (self.client_address[0],
-                                   self.log_date_time_string(),
-                                   (fmt%args)[:80]))
-        
+                         (self.client_address[0],
+                          self.log_date_time_string(),
+                          (fmt%args)[:80]))
+
 
 def paillier_gen_privkey_thread():
     global paillier_private_key
@@ -459,29 +460,31 @@ def paillier_gen_privkey():
     thread.daemon = True
     thread.start()    
 
- 
+
 #Because there is a 1 in ? chance that the encrypted PMS will contain zero bytes in its
 #padding, we first try the encrypted PMS with a reliable site and see if it gets rejected.
 #TODO the probability seems to have increased too much w.r.t. random padding, investigate
-def prepare_pms():
+def prepare_pms(tlsn_session):
+    n = shared.bi2ba(tlsn_session.server_modulus)
+    rs_choice = random.choice(shared.reliable_sites.keys())
     for i in range(10): #keep trying until reliable site check succeeds
         try:
-            #first 4 bytes of client random are unix time
             pms_session = shared.TLSNClientSession(rs_choice,shared.reliable_sites[rs_choice][0], ccs=53, tlsver=global_tlsver)
             if not pms_session: 
                 raise Exception("Client session construction failed in prepare_pms")
             tls_sock = shared.create_sock(pms_session.server_name,pms_session.ssl_port)
             pms_session.start_handshake(tls_sock)
-            reply = send_and_recv('rcr_rsr_rsname:'+\
-                pms_session.client_random+pms_session.server_random+rs_choice)
+            reply = send_and_recv('rcr_rsr_rsname_n:'+\
+                                  pms_session.client_random+pms_session.server_random+rs_choice[:5]+n)
             if reply[0] != 'success': 
-                raise Exception ('Failed to receive a reply for rcr_rsr_rsname:')
-            if not reply[1].startswith('rrsapms_rhmac'):
-                raise Exception ('bad reply. Expected rrsapms_rhmac:')
-            reply_data = reply[1][len('rrsapms_rhmac:'):]
-            rsapms2 = reply_data[:256]
+                raise Exception ('Failed to receive a reply for rcr_rsr_rsname_n:')
+            if not reply[1].startswith('rrsapms_rhmac_rsapms'):
+                raise Exception ('bad reply. Expected rrsapms_rhmac_rsapms:')
+            reply_data = reply[1][len('rrsapms_rhmac_rsapms:'):]
+            rrsapms2 = reply_data[:256]
             pms_session.p_auditor = reply_data[256:304]
-            response = pms_session.complete_handshake(tls_sock,rsapms2)
+            rsapms2 = reply_data[304:]
+            response = pms_session.complete_handshake(tls_sock,rrsapms2)
             tls_sock.close()
             if not response:
                 print ("PMS trial failed")
@@ -492,43 +495,23 @@ def prepare_pms():
             if not response.count(shared.TLSRecord(shared.chcis,f='\x01', tlsver=global_tlsver).serialized):
                 print ("PMS trial failed, retrying. (",binascii.hexlify(response),")")
                 continue
-            return (pms_session.auditee_secret,pms_session.auditee_padding_secret)
+            tlsn_session.auditee_secret = pms_session.auditee_secret
+            tlsn_session.auditee_padding_secret = pms_session.auditee_padding_secret		
+            tlsn_session.enc_second_half_pms = shared.ba2int(rsapms2)			
+            tlsn_session.set_enc_first_half_pms()
+            tlsn_session.set_encrypted_pms()
+            return
         except Exception,e:
             print ('Exception caught in prepare_pms, retrying...', e)
             continue
-    #no dice after 10 tries
     raise Exception ('Could not prepare PMS with ', rs_choice, ' after 10 tries. Please '+\
                      'double check that you are using a valid public key modulus for this site; '+\
                      'it may have expired.')
 
 
-def prepare_encrypted_pms(tlsn_session, server_modulus, pms_secret, pms_padding_secret):
-    tlsn_session.auditee_secret, tlsn_session.auditee_padding_secret = pms_secret, pms_padding_secret
-    n = server_modulus
-    e = shared.bi2ba(65537)
-    len_n = shared.bi2ba(len(n))
-    for i in range(10):
-        try:
-            reply = send_and_recv('n_e:'+len_n+n+e)
-            if reply[0] != 'success': 
-                raise Exception ('Failed to receive a reply for n_e:')
-            if not reply[1].startswith('rsapms:'):
-                raise Exception ('bad reply. Expected rsapms:')
-            break
-        except Exception, exc:
-            print ('Exception in prepare_encrypted_pms, retrying...', exc)
-            continue
-    rsapms = reply[1][len('rsapms:'):]
-    tlsn_session.server_modulus = shared.ba2int(n)
-    tlsn_session.server_mod_length = len_n
-    tlsn_session.enc_second_half_pms = shared.ba2int(rsapms)
-    tlsn_session.set_enc_first_half_pms()
-    tlsn_session.set_encrypted_pms()    
-
-
-def paillier_prepare_encrypted_pms(tlsn_session, server_modulus):
+def paillier_prepare_encrypted_pms(tlsn_session):
     #cert_pubkey is lowercase hexdigest
-    N_ba = server_modulus
+    N_ba = tlsn_session.server_modulus
     if len(N_ba) > 256:
         raise Exception ('''Can not audit the website with a pubkey length more than 256 bytes.
         Please set use_paillier_scheme = 0 in tlsnotary.ini and rerun tlsnotary''')
@@ -552,7 +535,7 @@ def paillier_prepare_encrypted_pms(tlsn_session, server_modulus):
             reply = send_and_recv('p_link:'+link, timeout=200)
             if reply[0] != 'success':
                 raise Exception ('Failed to receive a reply for p_link:')
-            
+
             for i in range(8):
                 if not reply[1].startswith('p_round_or'+str(i)+':'):
                     raise Exception('bad reply. Expected p_round_or'+str(i)+' but got', reply[1][:20])
@@ -561,7 +544,7 @@ def paillier_prepare_encrypted_pms(tlsn_session, server_modulus):
                 reply = send_and_recv('p_round_ee'+str(i)+':'+F_ba, timeout=10)
                 if reply[0] != 'success': 
                     raise Exception ('Failed to receive a reply for p_round_ee'+str(i)+':')
-           
+
             if not reply[1].startswith('p_round_or8:'):
                 raise Exception ('bad reply. Expected p_round_or8 but got', reply[1])
             PSum_ba = reply[1][len('p_round_or8:'):]
@@ -572,7 +555,7 @@ def paillier_prepare_encrypted_pms(tlsn_session, server_modulus):
             print ('Exception in paillier_prepare_encrypted_pms, retrying...', exc)
             continue
 
-    
+
 #peer messaging protocol
 def send_and_recv (data,timeout=5):
     if not ('success' == shared.tlsn_send_msg(data,auditor_pub_key,ack_queue,auditor_nick,seq_init=None)):
@@ -664,7 +647,7 @@ def negotiate_crippled_secrets(tlsn_session, tls_sock):
     if not tlsn_session.check_server_ccs_finished(provided_p_value = reply[1][len('verify_hmac2:'):]):
         raise Exception ("Could not finish handshake with server successfully. Audit aborted")
     return 'success'    
-    
+
 def make_tlsn_request(headers,tlsn_session,tls_sock):
     '''Send TLS request including http headers and receive server response.'''
     tlsn_session.build_request(tls_sock,headers)
@@ -706,7 +689,7 @@ def decrypt_html(sha1hmac, tlsn_session,sf):
     tlsn_session.p_auditor = sha1hmac
     tlsn_session.set_master_secret_half() #without arguments sets the whole MS
     tlsn_session.do_key_expansion() #also resets encryption connection state
-    
+
     if global_use_slowaes or not tlsn_session.chosen_cipher_suite in [47,53]:
         #either using slowAES or a RC4 ciphersuite
         plaintext,bad_mac = tlsn_session.process_server_app_data_records()
@@ -749,17 +732,12 @@ def start_peer_messaging():
 def peer_handshake():
     global my_nick
     global auditor_nick
-    global rs_choice
     shared.import_reliable_sites(join(install_dir,'src','shared'))
     #hello contains the first 10 bytes of modulus of the auditor's pubkey
     #this is how the auditor knows that we are addressing him.
     modulus = shared.bi2ba(auditor_pub_key.n)[:10]
     #pad to 1024bit = 128 bytes
     signed_hello = rsa.sign('ae_hello'+my_nick, my_prv_key, 'SHA-1').rjust(128, '\x00')
-    rs_choice = random.choice(shared.reliable_sites.keys())
-    print ("Chosen site: ",rs_choice)
-    rs_n = shared.reliable_sites[rs_choice][1].decode('hex')
-    rs_e = shared.bi2ba(65537,fixed=4)
 
     b_is_auditor_registered = False
     for attempt in range(6): #try for 6*5 secs to find the auditor
@@ -807,9 +785,9 @@ def start_firefox(FF_to_backend_port, firefox_install_path):
     ffbinloc = {'linux':['firefox'],'mswin':['firefox.exe'],'macos':['Contents','MacOS','firefox']}
     assert os.path.isfile(join(*([firefox_install_path]+ffbinloc[OS]))),\
            "Firefox executable not found - invalid Firefox application directory."
-        
+
     local_ff_copy = join(data_dir,'Firefox.app') if OS=='macos' else join(data_dir,'firefoxcopy')  
-    
+
     #check if FF-addon/tlsnotary@tlsnotary files were modified. If so, get a fresh 
     #firefoxcopy and FF-profile. This is useful for developers, otherwise
     #we forget to do it manually and end up chasing wild geese
@@ -832,9 +810,9 @@ def start_firefox(FF_to_backend_port, firefox_install_path):
             except:
                 pass
             with open(hash_path, 'wb') as f: f.write(final_hash)            
-            
+
     firefox_exepath = join(*([firefox_install_path]+ffbinloc[OS]))
-    
+
     logs_dir = join(data_dir, 'logs')
     if not os.path.isdir(logs_dir): os.makedirs(logs_dir)
     with open(join(logs_dir, 'firefox.stdout'), 'w') as f: pass
@@ -844,7 +822,7 @@ def start_firefox(FF_to_backend_port, firefox_install_path):
     shutil.copyfile(join(data_dir,'prefs.js'),join(ffprof_dir,'prefs.js'))
     shutil.copyfile(join(data_dir,'localstore.rdf'),join(ffprof_dir,'localstore.rdf'))
     shutil.copyfile(join(data_dir,'extensions.json'),join(ffprof_dir,'extensions.json'))
- 
+
     extension_path = join(ffprof_dir, 'extensions', 'tlsnotary@tlsnotary')
     if not os.path.exists(extension_path):
         shutil.copytree(join(data_dir, 'FF-addon', 'tlsnotary@tlsnotary'),extension_path)
@@ -857,7 +835,7 @@ def start_firefox(FF_to_backend_port, firefox_install_path):
         #version string can be 34.0 or 34.0.5
         version_raw = application_ini_data[version_pos:version_pos+8]
         version = ''.join(char for char in version_raw if char in '1234567890.')
-        
+
         with open(join(ffprof_dir, 'prefs.js'), 'a') as f:
             f.write('user_pref("extensions.lastAppVersion", "' + version + '"); ')
     except:
@@ -871,14 +849,14 @@ def start_firefox(FF_to_backend_port, firefox_install_path):
     if testing:
         print ('****************************TESTING MODE********************************')
         os.putenv('TLSNOTARY_TEST', 'true')
-    
+
     print ('Starting a new instance of Firefox with tlsnotary profile',end='\r\n')
     try: ff_proc = Popen([firefox_exepath,'-no-remote', '-profile', ffprof_dir],
-                                   stdout=open(join(logs_dir, 'firefox.stdout'),'w'), 
-                                   stderr=open(join(logs_dir, 'firefox.stderr'), 'w'))
+                         stdout=open(join(logs_dir, 'firefox.stdout'),'w'), 
+                         stderr=open(join(logs_dir, 'firefox.stderr'), 'w'))
     except Exception,e: return ('Error starting Firefox: %s' %e,)
     return ('success', ff_proc)
-    
+
 #HTTP server to talk with Firefox addon
 def http_server(parentthread): 
     print ('Starting http server to communicate with Firefox addon')
@@ -969,9 +947,9 @@ def start_testing():
     test_proc = subprocess.Popen(filter(None,['python', test_py, site_list, str(os.getpid()), str(test_auditor_pid)]))
     global test_driver_pid
     test_driver_pid = test_proc.pid
-            
 
- 
+
+
 if __name__ == "__main__":
     if ('test' in sys.argv): testing = True
     if ('randomtest' in sys.argv): 
@@ -988,7 +966,7 @@ if __name__ == "__main__":
     for x,h in modules_to_load.iteritems():
         first_run_check(x,h)
         sys.path.append(join(data_dir, 'python', x))
-        
+
     import rsa
     import pyasn1
     import requests
@@ -1011,7 +989,7 @@ if __name__ == "__main__":
     firefox_install_path = None
     if len(sys.argv) > 1: firefox_install_path = sys.argv[1]
     if firefox_install_path in ('test', 'randomtest'): firefox_install_path = None
-    
+
     if mode == 'normal':
         if not firefox_install_path:
             if OS=='linux':
@@ -1047,7 +1025,7 @@ if __name__ == "__main__":
         print ("Firefox install path is: ",firefox_install_path)
         if not os.path.exists(firefox_install_path): 
             raise Exception ("Could not find Firefox installation")
-    
+
     thread = shared.ThreadWithRetval(target= http_server)
     thread.daemon = True
     thread.start()
@@ -1059,14 +1037,14 @@ if __name__ == "__main__":
         #else
         if thread.retval[0] != 'success': 
             raise Exception (
-            'Failed to start minihttpd server. Please investigate')
+                'Failed to start minihttpd server. Please investigate')
         #else
         b_was_started = True
         break
     if b_was_started == False:
         raise Exception ('minihttpd failed to start in 10 secs. Please investigate')
     FF_to_backend_port = thread.retval[1]
-                      
+
     if mode == 'addon':
         with open (join(data_dir, 'ports'), 'w') as f:
             f.write(str(FF_to_backend_port))
@@ -1074,10 +1052,10 @@ if __name__ == "__main__":
         ff_retval = start_firefox(FF_to_backend_port, firefox_install_path)
         if ff_retval[0] != 'success': 
             raise Exception (
-            'Error while starting Firefox: '+ ff_retval[0])
+                'Error while starting Firefox: '+ ff_retval[0])
         ff_proc = ff_retval[1]
         firefox_pid = ff_proc.pid 
-       
+
     signal.signal(signal.SIGTERM, quit_clean)
 
     if testing: start_testing()
