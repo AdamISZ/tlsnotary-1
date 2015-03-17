@@ -163,6 +163,8 @@ def process_messages():
             with open(cr_path, 'wb') as f: f.write(tlsn_session.client_random)
             sr_path = os.path.join(commit_dir,'sr'+str(my_seqno))
             with open(sr_path,'wb') as f: f.write(tlsn_session.server_random)
+            n_path = os.path.join(commit_dir,'n'+str(my_seqno))
+            with open(n_path,'wb') as f: f.write(shared.bi2ba(tlsn_session.server_modulus))
             send_message('sha1hmac_for_MS:'+tlsn_session.p_auditor)
             continue  
         #---------------------------------------------------------------------#
@@ -231,7 +233,7 @@ def process_messages():
                 for fname in ['md5hmac','response','IV','cs']:
                     with open(os.path.join(auditeetrace_dir, fname+seqno), 'rb') as f: 
                         decr_data[fname] = f.read()
-                for fname in ['sha1hmac','cr','sr']:
+                for fname in ['sha1hmac','cr','sr', 'n']:
                     with open(os.path.join(commit_dir, fname+seqno), 'rb') as f: 
                         decr_data[fname] = f.read()
                 tlsver = decr_data['response'][2:4]
@@ -242,6 +244,7 @@ def process_messages():
                 decr_session.server_random = decr_data['sr']
                 decr_session.p_auditee = decr_data['md5hmac']
                 decr_session.p_auditor = decr_data['sha1hmac']
+                n = decr_data['n']
                 decr_session.set_master_secret_half()
                 decr_session.do_key_expansion()
                 decr_session.store_server_app_data_records(decr_data['response'][1:])
@@ -263,28 +266,47 @@ def process_messages():
                 with open (os.path.join(auditeetrace_dir, 'certificate.der'+seqno), 'rb') as f: certDER = f.read()
                 certPEM = base64.b64encode(certDER)
                 write_data = domain_data + '\n\n'
-                write_data += """
+                write_data += r"""
 You must paste the code below into the Browser Console of Mozilla Firefox to finish the audit.
 1. Enable the Browser Console by pressing Ctrl+Shift+I or from menu Tools-Web Developer-Toggle Tools
 2. In the upper right corner of the appeared console click a cogwheel icon (Toolbox Options)
 3. Scroll down a little and check "Enable chrome and add-on debugging" in the right hand side column
 4. Bring up Browser Console by pressing Ctrl+Shift+J or from menu Tools-Web Developer-Browser Console
 5. Paste the code below where the blinking cursor is at the bottom of the Browser Console and press Enter
-----------------------COPY AND PASTE THE CODE BELOW THIS LINE INTO THE BROWSER CONSOLE---------------
+----------------------COPY AND PASTE EVERYTHING BELOW THIS LINE INTO THE BROWSER CONSOLE---------------
 
-function verifyCert(certBase64){
+function checkAndVerify(certBase64){
 	const {classes: Cc, interfaces: Ci} = Components;
 	const nsIX509CertDB = Ci.nsIX509CertDB;
 	const nsX509CertDB = "@mozilla.org/security/x509certdb;1";
 	const nsIX509Cert = Ci.nsIX509Cert;
+	const nsASN1Tree = "@mozilla.org/security/nsASN1Tree;1"
+	const nsIASN1Tree = Ci.nsIASN1Tree;
 	let certdb = Cc[nsX509CertDB].getService(nsIX509CertDB);
 	let cert = certdb.constructX509FromBase64(certBase64);
+	let hexmodulus = "";
+	let certDumpTree = Cc[nsASN1Tree].createInstance(nsIASN1Tree);
+	certDumpTree.loadASN1Structure(cert.ASN1Structure);
+	let modulus_str = certDumpTree.getDisplayData(12);
+	if (! modulus_str.startsWith( "Modulus (" ) ){alert("ERROR.NOT AN RSA CERTIFICATE");return;}
+	let lines = modulus_str.split('\n');
+	let line = "";
+	for (var i = 1; i<lines.length; ++i){
+		line = lines[i];
+		//an empty line is where the pubkey part ends
+		if (line == "") {break;}
+		//remove all whitespaces (g is a global flag)
+		hexmodulus += line.replace(/\s/g, '');
+	}
+"""+'\n    let saved_n_hex = "' + binascii.hexlify(n) + '"'
+                write_data +="""
+	if (! hexmodulus == saved_n_hex){alert("ERROR. MODULI DONT MATCH");return;}
 	let a = {}, b = {};
 	let retval = certdb.verifyCertNow(cert, nsIX509Cert.CERT_USAGE_SSLServer, nsIX509CertDB.FLAG_LOCAL_ONLY, a, b);
 	if (retval == 0){alert(cert.commonName + ' was successfully verified')}
 	else {alert('FAILED TO VERIFY')}
 }
-let cert =""" + '"' + certPEM + '"' + "\n" + "verifyCert(cert)"
+let cert =""" + '"' + certPEM + '"' + "\n" + "checkAndVerify(cert)"
                 write_data += '\n\n'
                 #format pubkey in nice rows of 16 hex numbers just like Firefox does
                 #we may need this later
