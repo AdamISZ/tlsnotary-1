@@ -325,21 +325,6 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
             randomize_settings()
 
 
-    def randomize_settings():
-        #set random values before the next page begins to be audited
-        global_use_gzip = (True, False)[random.randint(0,1)]
-        global_use_slowaes = (True, False)[random.randint(0,1)]
-        #we dont want to use paillier too often because it takes 2 minutes for 1 audit
-        global_use_paillier = (True, False, False, False, False, False)[random.randint(0,5)]
-        global_tlsver = (bytearray('\x03\x01'), bytearray('\x03\x02'))[random.randint(0,1)]
-        if global_use_paillier:
-            #in normal mode, paillier key is generated as soon as we start p2p connection
-            #however, in randomtest it is cleaner to generate it on first use
-            if not paillier_private_key:
-                paillier_gen_privkey()
-        print('use_gzip', global_use_gzip, 'use_slowaes', global_use_slowaes, 'tlsver', global_tlsver, 'use_paillier',  global_use_paillier)    
-
-
     def send_link(self, args):
         rv = send_link(args)
         self.respond({'response':'send_link', 'status':rv})
@@ -449,6 +434,25 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
                           (fmt%args)[:80]))
 
 
+def randomize_settings():
+    global global_tlsver
+    global global_use_gzip
+    global global_use_slowaes
+    global global_use_paillier
+    #set random values before the next page begins to be audited
+    global_use_gzip = (True, False)[random.randint(0,1)]
+    global_use_slowaes = (True, False, False, False, False, False)[random.randint(0,5)]
+    #we dont want to use paillier too often because it takes 2 minutes for 1 audit
+    global_use_paillier = (True, False, False, False, False, False)[random.randint(0,5)]
+    global_tlsver = (bytearray('\x03\x01'), bytearray('\x03\x02'))[random.randint(0,1)]
+    if global_use_paillier:
+        #in normal mode, paillier key is generated as soon as we start p2p connection
+        #however, in randomtest it is cleaner to generate it on first use
+        if not paillier_private_key:
+            paillier_gen_privkey()
+    print('Settings for next audit: use_gzip', global_use_gzip, 'use_slowaes', global_use_slowaes, 'tlsver', binascii.hexlify(global_tlsver), 'use_paillier',  global_use_paillier)    
+
+
 def paillier_gen_privkey_thread():
     global paillier_private_key
     paillier_private_key = shared.Paillier(privkey_bits=4096+8)
@@ -511,7 +515,7 @@ def prepare_pms(tlsn_session):
 
 def paillier_prepare_encrypted_pms(tlsn_session):
     #cert_pubkey is lowercase hexdigest
-    N_ba = tlsn_session.server_modulus
+    N_ba = shared.bi2ba(tlsn_session.server_modulus)
     if len(N_ba) > 256:
         raise Exception ('''Can not audit the website with a pubkey length more than 256 bytes.
         Please set use_paillier_scheme = 0 in tlsnotary.ini and rerun tlsnotary''')
