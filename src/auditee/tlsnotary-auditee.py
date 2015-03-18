@@ -41,8 +41,6 @@ b_peer_connected = False #toggled to True when p2p connection is establishe
 auditor_nick = '' #we learn auditor's nick as soon as we get a ao_hello signed by the auditor
 my_nick = '' #our nick is randomly generated on connection
 my_prv_key = my_pub_key = auditor_pub_key = None
-rs_modulus = None
-rs_exponent = None
 firefox_pid = selftest_pid = 0
 audit_no = 0 #we may be auditing multiple URLs. This var keeps track of how many
 #successful audits there were so far and is used to index html files audited.
@@ -279,7 +277,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         sf = str(audit_no)
         for i in range (10):
             try:
-                sha1hmac = commit_session(tlsn_session, response,sf)
+                pms2 = commit_session(tlsn_session, response,sf)
                 break
             except Exception, e:
                 if i == 9:
@@ -287,7 +285,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
                 print ('Exception caught while sending a commit to peer, retrying...', e)
                 continue
 
-        rv = decrypt_html(sha1hmac, tlsn_session, sf)
+        rv = decrypt_html(pms2, tlsn_session, sf)
         if rv[0] == 'decrypt':
             ciphertexts = rv[1]
             ciphertext, key, iv = ciphertexts[0]
@@ -579,7 +577,7 @@ def stop_recording():
     commit_dir = join(current_session_dir, 'commit')
     com_dir_files = os.listdir(commit_dir)
     for onefile in com_dir_files:
-        if not onefile.startswith(('response', 'md5hmac', 'domain','IV','cs','certificate.der')): continue
+        if not onefile.startswith(('pms_ee','response', 'md5hmac', 'domain','IV','cs','certificate.der')): continue
         zipf.write(join(commit_dir, onefile), onefile)
     zipf.close()
     path = join(trace_dir, 'mytrace.zip')
@@ -672,25 +670,25 @@ def commit_session(tlsn_session,response,sf):
         if tlsn_session.chosen_cipher_suite in [4,5] else tlsn_session.IV_after_finished
     stuff_to_be_committed  = {'response':response,'IV':IV,
                               'cs':str(tlsn_session.chosen_cipher_suite),
-                              'md5hmac':tlsn_session.p_auditee,'domain':tlsn_session.server_name,
+                              'pms_ee':tlsn_session.pms1,'domain':tlsn_session.server_name,
                               'certificate.der':tlsn_session.server_certificate.asn1cert}
     for k,v in stuff_to_be_committed.iteritems():
         with open(join(commit_dir,k+sf),'wb') as f: f.write(v)    
     commit_hash = sha256(response).digest()
-    md5hmac_hash = sha256(tlsn_session.p_auditee).digest()
-    reply = send_and_recv('commit_hash:'+commit_hash+md5hmac_hash)
+    reply = send_and_recv('commit_hash:'+commit_hash)
     if reply[0] != 'success': 
         raise Exception ('Failed to receive a reply') 
-    if not reply[1].startswith('sha1hmac_for_MS:'):
-        raise Exception ('bad reply. Expected sha1hmac_for_MS')    
-    return reply[1][len('sha1hmac_for_MS:'):]
+    if not reply[1].startswith('pms2:'):
+        raise Exception ('bad reply. Expected pms2')    
+    return reply[1][len('pms2:'):]
 
 
-def decrypt_html(sha1hmac, tlsn_session,sf):
+def decrypt_html(pms2, tlsn_session,sf):
     '''Receive correct server mac key and then decrypt server response (html),
     (includes authentication of response). Submit resulting html for browser
     for display (optionally render by stripping http headers).'''
-    tlsn_session.p_auditor = sha1hmac
+    tlsn_session.auditor_secret = pms2[:tlsn_session.n_auditor_entropy]
+    tlsn_session.set_auditor_secret()
     tlsn_session.set_master_secret_half() #without arguments sets the whole MS
     tlsn_session.do_key_expansion() #also resets encryption connection state
 

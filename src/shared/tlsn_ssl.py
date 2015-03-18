@@ -469,6 +469,8 @@ class TLSNClientSession(object):
         self.auditee_secret = None
         self.auditor_padding_secret = None
         self.auditee_padding_secret = None
+        self.pms1 = None #auditee's
+        self.pms2 = None #auditor's
         self.enc_first_half_pms = None
         self.enc_second_half_pms = None
         self.enc_pms = None
@@ -728,9 +730,9 @@ class TLSNClientSession(object):
     def set_enc_first_half_pms(self):
         assert (self.server_modulus and not self.enc_first_half_pms)
         ones_length = 23            
-        pms1 = self.initial_tlsver+self.auditee_secret + ('\x00' * (24-2-self.n_auditee_entropy))
+        self.pms1 = self.initial_tlsver+self.auditee_secret + ('\x00' * (24-2-self.n_auditee_entropy))
         self.enc_first_half_pms = pow(ba2int('\x02'+('\x01'*(ones_length))+\
-        self.auditee_padding_secret+'\x00'+pms1 +'\x00'*23 + '\x01'), self.server_exponent, self.server_modulus)
+        self.auditee_padding_secret+'\x00'+self.pms1 +'\x00'*23 + '\x01'), self.server_exponent, self.server_modulus)
      
     def set_auditee_secret(self):
         '''Sets up the auditee's half of the preparatory
@@ -749,17 +751,17 @@ class TLSNClientSession(object):
             self.auditee_padding_secret = os.urandom(15)
         label = 'master secret'
         seed = cr + sr
-        pms1 = tlsver_ch+self.auditee_secret + ('\x00' * (24-2-self.n_auditee_entropy))
-        self.p_auditee = tls_10_prf(label+seed,first_half = pms1)[0]
+        self.pms1 = tlsver_ch+self.auditee_secret + ('\x00' * (24-2-self.n_auditee_entropy))
+        self.p_auditee = tls_10_prf(label+seed,first_half = self.pms1)[0]
         #encrypted PMS has already been calculated before the audit began
         return (self.p_auditee)
 
     def set_enc_second_half_pms(self):
         assert (self.server_modulus)
         ones_length = 103+ba2int(self.server_mod_length)-256
-        pms2 =  self.auditor_secret + ('\x00' * (24-self.n_auditor_entropy-1)) + '\x01'
+        self.pms2 =  self.auditor_secret + ('\x00' * (24-self.n_auditor_entropy-1)) + '\x01'
         self.enc_second_half_pms = pow( ba2int('\x01'+('\x01'*(ones_length))+\
-        self.auditor_padding_secret+ ('\x00'*25)+pms2), self.server_exponent, self.server_modulus )
+        self.auditor_padding_secret+ ('\x00'*25)+self.pms2), self.server_exponent, self.server_modulus )
 
     def set_auditor_secret(self):
         '''Sets up the auditor's half of the preparatory
@@ -775,8 +777,8 @@ class TLSNClientSession(object):
             self.auditor_padding_secret =  os.urandom(15)
         label = 'master secret'
         seed = cr + sr
-        pms2 =  self.auditor_secret + ('\x00' * (24-self.n_auditor_entropy-1)) + '\x01'
-        self.p_auditor = tls_10_prf(label+seed,second_half = pms2)[1]
+        self.pms2 =  self.auditor_secret + ('\x00' * (24-self.n_auditor_entropy-1)) + '\x01'
+        self.p_auditor = tls_10_prf(label+seed,second_half = self.pms2)[1]
         return (self.p_auditor)        
     
     def set_master_secret_half(self,half=1,provided_p_value=None):

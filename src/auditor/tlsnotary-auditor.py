@@ -135,7 +135,6 @@ def process_messages():
         elif msg.startswith('commit_hash:'):
             commit_hash = msg[len('commit_hash:'):]
             response_hash = commit_hash[:32]
-            md5hmac_hash = commit_hash[32:64]
             commit_dir = os.path.join(current_sessiondir, 'commit')
             if not os.path.exists(commit_dir): os.makedirs(commit_dir)
             #file names are assigned sequentially hash1, hash2 etc.
@@ -148,24 +147,17 @@ def process_messages():
             last_seqno = max([0] + seqnos) #avoid throwing by feeding at least one value 0
             my_seqno = last_seqno+1
             response_hash_path = os.path.join(commit_dir, 'responsehash'+str(my_seqno))
-            n_hexlified = binascii.hexlify(shared.bi2ba(tlsn_session.server_modulus))
-            #pubkey in the format 09 56 23 ....
-            n_write = " ".join(n_hexlified[i:i+2] for i in range(0, len(n_hexlified), 2)) 
-            pubkey_path = os.path.join(commit_dir, 'pubkey'+str(my_seqno))
-            response_hash_path = os.path.join(commit_dir, 'responsehash'+str(my_seqno))
-            md5hmac_hash_path =  os.path.join(commit_dir, 'md5hmac_hash'+str(my_seqno))
-            with open(pubkey_path, 'wb') as f: f.write(n_write)            
             with open(response_hash_path, 'wb') as f: f.write(response_hash)
-            with open(md5hmac_hash_path, 'wb') as f: f.write(md5hmac_hash)
-            sha1hmac_path = os.path.join(commit_dir, 'sha1hmac'+str(my_seqno))
-            with open(sha1hmac_path, 'wb') as f: f.write(tlsn_session.p_auditor)
+            pms2_path = os.path.join(commit_dir, 'pms_or'+str(my_seqno))
+            assert tlsn_session.pms2
+            with open(pms2_path, 'wb') as f: f.write(tlsn_session.pms2)
             cr_path = os.path.join(commit_dir, 'cr'+str(my_seqno))
             with open(cr_path, 'wb') as f: f.write(tlsn_session.client_random)
             sr_path = os.path.join(commit_dir,'sr'+str(my_seqno))
             with open(sr_path,'wb') as f: f.write(tlsn_session.server_random)
             n_path = os.path.join(commit_dir,'n'+str(my_seqno))
             with open(n_path,'wb') as f: f.write(shared.bi2ba(tlsn_session.server_modulus))
-            send_message('sha1hmac_for_MS:'+tlsn_session.p_auditor)
+            send_message('pms2:'+tlsn_session.pms2)
             continue  
         #---------------------------------------------------------------------#
         #Phase 1: Receive a url from the auditee from which can be downloaded a zip file containing
@@ -206,20 +198,9 @@ def process_messages():
                 response_hash = hashlib.sha256(responsedata).digest()
                 if not saved_hash == response_hash:
                     raise Exception ('WARNING: response\'s hash doesn\'t match the hash committed to')
-                iv_path = os.path.join(auditeetrace_dir,'IV'+str(this_seqno))
-                if not os.path.exists(iv_path):
-                    raise Exception("WARNING: Could not find IV block in auditeetrace")
-                md5hmac_path = os.path.join(auditeetrace_dir, 'md5hmac'+str(this_seqno))
-                if not os.path.exists(md5hmac_path):
-                    raise Exception ('WARNING: Could not find md5hmac in auditeetrace')
-                with open(md5hmac_path, 'rb') as f: md5hmac_data = f.read()
-                md5hmac_hash = hashlib.sha256(md5hmac_data).digest()
-                with open(os.path.join(commit_dir, 'md5hmac_hash'+str(this_seqno)), 'rb') as f: commited_md5hmac_hash = f.read()
-                if not md5hmac_hash == commited_md5hmac_hash:
-                    raise Exception ('WARNING: mismatch in committed md5hmac hashes')
-                domain_path = os.path.join(auditeetrace_dir, 'domain'+str(this_seqno))
-                if not os.path.exists(domain_path):
-                    raise Exception ('WARNING: Could not find domain in auditeetrace')                
+                for fname in ['pms_ee','response','IV','cs', 'certificate.der', 'domain']:
+                    if not os.path.exists(os.path.join(auditeetrace_dir,fname+str(this_seqno))):
+                        raise Exception("WARNING: Could not find "+fname+" in auditeetrace")
                 #elif no errors
                 seqnos.append(this_seqno)
                 continue
@@ -230,10 +211,10 @@ def process_messages():
                 if not one_response.startswith('response'): continue
                 seqno = one_response[len('response'):]
                 decr_data = {}
-                for fname in ['md5hmac','response','IV','cs']:
+                for fname in ['pms_ee','response','IV','cs']:
                     with open(os.path.join(auditeetrace_dir, fname+seqno), 'rb') as f: 
                         decr_data[fname] = f.read()
-                for fname in ['sha1hmac','cr','sr', 'n']:
+                for fname in ['pms_or','cr','sr', 'n']:
                     with open(os.path.join(commit_dir, fname+seqno), 'rb') as f: 
                         decr_data[fname] = f.read()
                 tlsver = decr_data['response'][2:4]
@@ -242,8 +223,10 @@ def process_messages():
                 #update TLS protocol dynamically based on response content
                 decr_session.client_random = decr_data['cr']
                 decr_session.server_random = decr_data['sr']
-                decr_session.p_auditee = decr_data['md5hmac']
-                decr_session.p_auditor = decr_data['sha1hmac']
+                decr_session.auditee_secret = decr_data['pms_ee'][2:2+decr_session.n_auditee_entropy]
+                decr_session.set_auditee_secret()
+                decr_session.auditor_secret = decr_data['pms_or'][:decr_session.n_auditor_entropy]
+                decr_session.set_auditor_secret()
                 n = decr_data['n']
                 decr_session.set_master_secret_half()
                 decr_session.do_key_expansion()
@@ -262,7 +245,6 @@ def process_messages():
                 with open(path, 'wb') as f: f.write(plaintext) #TODO maybe strip headers?
                 #also create a file where the auditor can see the domain and pubkey
                 with open (os.path.join(auditeetrace_dir, 'domain'+seqno), 'rb') as f: domain_data = f.read()
-                with open (os.path.join(commit_dir, 'pubkey'+seqno), 'rb') as f: pubkey_data = f.read()
                 with open (os.path.join(auditeetrace_dir, 'certificate.der'+seqno), 'rb') as f: certDER = f.read()
                 certPEM = base64.b64encode(certDER)
                 write_data = domain_data + '\n\n'
