@@ -201,9 +201,14 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         headers = b64decode(b64headers)
         server_name, modified_headers = parse_headers(headers)        
         print('Probing server to get its certificate')
-        probe_session = shared.TLSNClientSession(server_name, tlsver=global_tlsver)
-        probe_sock = shared.create_sock(probe_session.server_name,probe_session.ssl_port)
-        probe_session.start_handshake(probe_sock)
+        try:
+            probe_session = shared.TLSNClientSession(server_name, tlsver=global_tlsver)
+            probe_sock = shared.create_sock(probe_session.server_name,probe_session.ssl_port)
+            probe_session.start_handshake(probe_sock)
+        except shared.TLSNSSLError:
+            shared.ssl_dump(probe_session)
+            raise
+        
         probe_sock.close()
         certBase64 = b64encode(probe_session.server_certificate.asn1cert)
         certhash = sha256(probe_session.server_certificate.asn1cert).hexdigest()
@@ -211,7 +216,7 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
         return [server_name, modified_headers, certhash]
 
 
-    def start_audit(self, args):     
+    def start_audit(self, args):
         global global_tlsver
         global global_use_gzip
         global global_use_slowaes
@@ -250,12 +255,12 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
 
         for i in range(10):
             try:
-                print ('Peforming handshake with server')
+                print ('Performing handshake with server')
                 tls_sock = shared.create_sock(tlsn_session.server_name,tlsn_session.ssl_port)
                 tlsn_session.start_handshake(tls_sock)
                 retval = negotiate_crippled_secrets(tlsn_session, tls_sock)
                 if not retval == 'success': 
-                    raise Exception(retval)     
+                    raise shared.TLSNSSLError('Failed to negotiate secrets: '+retval)                         
                 #before sending any data to server compare this connection's cert to the
                 #one which FF already validated earlier
                 if sha256(tlsn_session.server_certificate.asn1cert).hexdigest() != certhash:
@@ -266,7 +271,10 @@ class HandleBrowserRequestsClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
                 #note: more than 256 unexpected records will cause a failure of audit. Just as well!
                 response = shared.bi2ba(tlsn_session.unexpected_server_app_data_count,fixed=1) + response
                 break
-            except Exception,e:
+            except shared.TLSNSSLError:
+                shared.ssl_dump(tlsn_session)
+                raise 
+            except Exception as e:
                 print ('Exception caught while getting data from server, retrying...', e)
                 if i == 9:
                     raise Exception('Audit failed')
@@ -503,6 +511,10 @@ def prepare_pms(tlsn_session):
             tlsn_session.set_enc_first_half_pms()
             tlsn_session.set_encrypted_pms()
             return
+        except shared.TLSNSSLError:
+            shared.ssl_dump(pms_session,fn='preparepms_ssldump')
+            shared.ssl_dump(tlsn_session)
+            raise
         except Exception,e:
             print ('Exception caught in prepare_pms, retrying...', e)
             continue
@@ -635,7 +647,7 @@ def negotiate_crippled_secrets(tlsn_session, tls_sock):
         raise Exception('unexpected reply length in negotiate_crippled_secrets')
     hmacms = reply_data[:24]    
     hmacek = reply_data[24:24 + expanded_key_len]
-    hmacverify = reply_data[24 + expanded_key_len:24 + expanded_key_len+12]   
+    hmacverify = reply_data[24 + expanded_key_len:24 + expanded_key_len+12] 
     tlsn_session.set_master_secret_half(half=2,provided_p_value = hmacms)
     tlsn_session.p_master_secret_auditor = hmacek
     tlsn_session.do_key_expansion()
@@ -652,11 +664,16 @@ def negotiate_crippled_secrets(tlsn_session, tls_sock):
 
 def make_tlsn_request(headers,tlsn_session,tls_sock):
     '''Send TLS request including http headers and receive server response.'''
-    tlsn_session.build_request(tls_sock,headers)
-    response = shared.recv_socket(tls_sock) #not handshake flag means we wait on timeout
-    if not response: 
-        raise Exception ("Received no response to request, cannot continue audit.")
-    tlsn_session.store_server_app_data_records(response)
+    try:
+        tlsn_session.build_request(tls_sock,headers)
+        response = shared.recv_socket(tls_sock) #not handshake flag means we wait on timeout
+        if not response: 
+            raise Exception ("Received no response to request, cannot continue audit.")
+        tlsn_session.store_server_app_data_records(response)
+    except shared.TLSNSSLError:
+        shared.ssl_dump(tlsn_session)
+        raise
+    
     tls_sock.close()
     #we return the full record set, not only the response to our request
     return tlsn_session.unexpected_server_app_data_raw + response
@@ -688,19 +705,30 @@ def decrypt_html(pms2, tlsn_session,sf):
     '''Receive correct server mac key and then decrypt server response (html),
     (includes authentication of response). Submit resulting html for browser
     for display (optionally render by stripping http headers).'''
-    tlsn_session.auditor_secret = pms2[:tlsn_session.n_auditor_entropy]
-    tlsn_session.set_auditor_secret()
-    tlsn_session.set_master_secret_half() #without arguments sets the whole MS
-    tlsn_session.do_key_expansion() #also resets encryption connection state
-
+    try:
+        tlsn_session.auditor_secret = pms2[:tlsn_session.n_auditor_entropy]
+        tlsn_session.set_auditor_secret()
+        tlsn_session.set_master_secret_half() #without arguments sets the whole MS
+        tlsn_session.do_key_expansion() #also resets encryption connection state
+    except shared.TLSNSSLError:
+        shared.ssl_dump(tlsn_session)
+        raise
     if global_use_slowaes or not tlsn_session.chosen_cipher_suite in [47,53]:
         #either using slowAES or a RC4 ciphersuite
-        plaintext,bad_mac = tlsn_session.process_server_app_data_records()
+        try:
+            plaintext,bad_mac = tlsn_session.process_server_app_data_records()
+        except shared.TLSNSSLError:
+            shared.ssl_dump(tlsn_session)
+            raise
         if bad_mac:
-            raise Exception("WARNING! Plaintext is not authenticated.")
+            raise Exception("ERROR! Audit not valid! Plaintext is not authenticated.")
         return decrypt_html_stage2(plaintext, tlsn_session, sf)
     else: #AES ciphersuite and not using slowaes
-        ciphertexts = tlsn_session.get_ciphertexts()
+        try:
+            ciphertexts = tlsn_session.get_ciphertexts()
+        except:
+            shared.ssl_dump(tlsn_session)
+            raise
         return ('decrypt', ciphertexts)
 
 
@@ -708,7 +736,7 @@ def decrypt_html_stage2(plaintext, tlsn_session, sf):
     plaintext = shared.dechunk_http(plaintext)
     if global_use_gzip:    
         plaintext = shared.gunzip_http(plaintext)
-
+    #write a session dump for checking even in case of success
     with open(join(current_session_dir,'session_dump'+sf),'wb') as f: f.write(tlsn_session.dump())
     commit_dir = join(current_session_dir, 'commit')
     html_path = join(commit_dir,'html-'+sf)

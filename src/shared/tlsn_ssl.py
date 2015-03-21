@@ -73,9 +73,17 @@ class TLSNSSLError(Exception):
             self.data = binascii.hexlify(data)
         else:
             self.data = ''
-    
+            
     def __str__(self):
-        return self.msg + ': ' + self.data
+            return self.msg + ': ' + self.data    
+
+def ssl_dump(session, fn=None):
+    #Note that this dump write could be encapsulated
+    #in the TLSNSSLError class, but the session object
+    #is not always available in context.
+    filename = 'ssldump' if not fn else fn
+    with open(filename,'wb') as f:
+        f.write(session.dump())    
     
 def tls_record_decoder(d):
     '''Given a binary data stream d,
