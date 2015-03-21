@@ -968,7 +968,7 @@ class TLSNClientSession(object):
             
             #plaintext is only included if it's appdata not alerts, and if it's 
             #not part of the ignored set (the set that was delivered pre-client-request)            
-            if rt==appd and i > self.unexpected_server_app_data_count:
+            if rt==appd and i > self.unexpected_server_app_data_count-1:
                 mac_stripped_plaintext += stripped_pt
             elif rt==alrt:
                 print ("Info: alert received, decrypted: ", binascii.hexlify(stripped_pt))
@@ -1021,7 +1021,7 @@ class TLSNClientSession(object):
                 bad_record_mac += 1
             #plaintext is only included if it's appdata not alerts, and if it's 
             #not part of the ignored set (the set that was delivered pre-client-request)
-            if rt== appd and i>self.unexpected_server_app_data_count: 
+            if rt== appd and i>self.unexpected_server_app_data_count-1: 
                 plaintexts += plaintext
     
         return (plaintexts, bad_record_mac)    
