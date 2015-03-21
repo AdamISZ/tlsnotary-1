@@ -577,7 +577,7 @@ def stop_recording():
     commit_dir = join(current_session_dir, 'commit')
     com_dir_files = os.listdir(commit_dir)
     for onefile in com_dir_files:
-        if not onefile.startswith(('pms_ee','response', 'md5hmac', 'domain','IV','cs','certificate.der')): continue
+        if not onefile.startswith(('pms_ee','response', 'tlsver', 'origtlsver', 'domain','IV','cs','certificate.der')): continue
         zipf.write(join(commit_dir, onefile), onefile)
     zipf.close()
     path = join(trace_dir, 'mytrace.zip')
@@ -671,7 +671,8 @@ def commit_session(tlsn_session,response,sf):
     stuff_to_be_committed  = {'response':response,'IV':IV,
                               'cs':str(tlsn_session.chosen_cipher_suite),
                               'pms_ee':tlsn_session.pms1,'domain':tlsn_session.server_name,
-                              'certificate.der':tlsn_session.server_certificate.asn1cert}
+                              'certificate.der':tlsn_session.server_certificate.asn1cert, 
+                              'origtlsver':tlsn_session.initial_tlsver, 'tlsver':tlsn_session.tlsver}
     for k,v in stuff_to_be_committed.iteritems():
         with open(join(commit_dir,k+sf),'wb') as f: f.write(v)    
     commit_hash = sha256(response).digest()

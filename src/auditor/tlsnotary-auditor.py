@@ -198,7 +198,7 @@ def process_messages():
                 response_hash = hashlib.sha256(responsedata).digest()
                 if not saved_hash == response_hash:
                     raise Exception ('WARNING: response\'s hash doesn\'t match the hash committed to')
-                for fname in ['pms_ee','response','IV','cs', 'certificate.der', 'domain']:
+                for fname in ['pms_ee','response','IV','cs', 'certificate.der', 'domain', 'tlsver', 'origtlsver']:
                     if not os.path.exists(os.path.join(auditeetrace_dir,fname+str(this_seqno))):
                         raise Exception("WARNING: Could not find "+fname+" in auditeetrace")
                 #elif no errors
@@ -211,16 +211,16 @@ def process_messages():
                 if not one_response.startswith('response'): continue
                 seqno = one_response[len('response'):]
                 decr_data = {}
-                for fname in ['pms_ee','response','IV','cs']:
+                for fname in ['pms_ee','response','IV','cs', 'tlsver', 'origtlsver']:
                     with open(os.path.join(auditeetrace_dir, fname+seqno), 'rb') as f: 
                         decr_data[fname] = f.read()
                 for fname in ['pms_or','cr','sr', 'n']:
                     with open(os.path.join(commit_dir, fname+seqno), 'rb') as f: 
                         decr_data[fname] = f.read()
-                tlsver = decr_data['response'][2:4]
-                decr_session = shared.TLSNClientSession(ccs = int(decr_data['cs']), tlsver=tlsver)
+                origtlsver = decr_data['origtlsver']
+                decr_session = shared.TLSNClientSession(ccs = int(decr_data['cs']), tlsver=origtlsver)
                 decr_session.unexpected_server_app_data_count = shared.ba2int(decr_data['response'][0])
-                #update TLS protocol dynamically based on response content
+                decr_session.tlsver = decr_data['tlsver']
                 decr_session.client_random = decr_data['cr']
                 decr_session.server_random = decr_data['sr']
                 decr_session.auditee_secret = decr_data['pms_ee'][2:2+decr_session.n_auditee_entropy]
